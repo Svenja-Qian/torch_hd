@@ -85,7 +85,7 @@ class Model(nn.Module):
 
 model = Model(1, 4)
 model = model.to(device)
-
+  
 with torch.no_grad():
     for samples, labels in tqdm(train_ld, desc="Training"):
         samples = samples.to(device)
