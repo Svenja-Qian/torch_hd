@@ -7,7 +7,7 @@ from tqdm import tqdm
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using {device} device")
 
-DIMENSIONS = 10000
+DIMENSIONS = 4000
 INPUT_FEATURES = 617
 BATCH_SIZE = 1
 
