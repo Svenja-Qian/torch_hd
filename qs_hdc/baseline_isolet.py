@@ -4,12 +4,20 @@ import torch.nn as nn
 from torchhd.datasets import ISOLET
 from tqdm import tqdm
 
+import argparse
+
+torch.manual_seed(0)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using {device} device")
 
-DIMENSIONS = 4000
+parser = argparse.ArgumentParser()
+parser.add_argument("--dim", type=int, default=4000)
+parser.add_argument("--batch_size", type=int, default=1)
+args = parser.parse_args()
+
+DIMENSIONS = args.dim
 INPUT_FEATURES = 617
-BATCH_SIZE = 1
+BATCH_SIZE = args.batch_size
 
 # Load ISOLET dataset
 train_ds = ISOLET("../data", train=True, download=True)

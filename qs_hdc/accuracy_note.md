@@ -11,8 +11,7 @@
 *   **Hypervector Dimensions ($D$):** 4000
 *   **Batch Size:** 1
 *   **Device:** CPU
-*   **Projection Method:** Random Projection (Binary, $+1/-1$ weights)
-*   **Encoding:** Center input $\rightarrow$ Project $\rightarrow$ Binarize (Threshold $>0$)
+*   **Projection Encoding Method:** Random Projection (Binary, $+1/-1$ weights)
 *   **Similarity Metric:** Hamming Similarity
 *   **Learning Method:** Online Accumulation (Centroid-based)
 
