@@ -1,6 +1,5 @@
 import subprocess
 import re
-import statistics
 import csv
 import sys
 import os
@@ -9,19 +8,18 @@ from tqdm import tqdm
 from datetime import datetime
 
 
-
 # ================= Configuration =================
 # List of scripts to test. Uncomment to enable.
 TARGET_SCRIPTS = [
-    #'/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_mnist.py',
+    # '/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_mnist.py',
     # '/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_ucihar.py',
     # '/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_emg.py',
      '/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_EuroLanguages.py',
-    #'/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_isolet.py',
+    # '/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_isolet.py',
 ]
 
 # Phase Control
-RUN_PHASE_DIM =  False
+RUN_PHASE_DIM =  True
 RUN_PHASE_BS =  True
 
 # Parameter Sweep
@@ -33,7 +31,7 @@ FIXED_DIMENSION = 4000
 FIXED_BATCH_SIZE = 1
 
 # Experiment Settings
-RUNS_PER_CONFIG = 10
+RUNS_PER_CONFIG = 1
 # Generate timestamped output file in qs_hdc directory (Modification 1 & 2)
 # Get the directory where the script is located
 output_dir = os.path.dirname(os.path.abspath(__file__))
@@ -46,20 +44,30 @@ COOLDOWN_PER_SET = 10
 
 # ================= Helper Functions =================
 
-def parse_accuracy(output):
+def parse_results(output):
     """
-    Parses the accuracy from the script output.
-    Expected format: "Testing accuracy of XX.XXX%"
+    Parses the accuracy and std dev from the script output.
+    Returns: (accuracy, std_dev) where accuracy can be None if not found.
     """
-    match = re.search(r"Testing accuracy of (\d+\.\d+)%", output)
-    if match:
-        return float(match.group(1))
-    return None
+    acc = None
+    std = 0.0
+    
+    # Match Accuracy
+    acc_match = re.search(r"(?:Testing accuracy of|Average Accuracy over \d+ runs:) (\d+\.\d+)%", output)
+    if acc_match:
+        acc = float(acc_match.group(1))
+        
+    # Match Std Dev (if available)
+    std_match = re.search(r"Std Dev: (\d+\.\d+)", output)
+    if std_match:
+        std = float(std_match.group(1))
+        
+    return acc, std
 
 def run_script_realtime(script_path, dim, batch_size):
     """
     Runs the python script with specified arguments and streams output in real-time.
-    Returns the parsed accuracy.
+    Returns: (accuracy, std_dev) or None if failed.
     """
     cmd = [sys.executable, script_path, "--dim", str(dim), "--batch_size", str(batch_size)]
     full_output = []
@@ -90,7 +98,7 @@ def run_script_realtime(script_path, dim, batch_size):
             
         # Parse accuracy from the collected output
         full_text = "".join(full_output)
-        return parse_accuracy(full_text)
+        return parse_results(full_text)
         
     except Exception as e:
         print(f"\n[Exception] Failed to run script: {e}")
@@ -138,65 +146,46 @@ def run_experiment_suite():
         if RUN_PHASE_DIM:
             print(f"\n\n=== Phase 1: Dimension Sweep for {script_name} ===")
             for dim in DIMENSIONS_SWEEP:
-                accuracies = []
+                # Run script ONCE (internal loop handles repetition)
+                result = run_script_realtime(script, dim, FIXED_BATCH_SIZE)
                 
-                # Inner loop for repeated runs
-                for i in range(RUNS_PER_CONFIG):
-                    print(f"\n--- Run {i+1}/{RUNS_PER_CONFIG} ---")
-                    acc = run_script_realtime(script, dim, FIXED_BATCH_SIZE)
+                if result is not None:
+                    acc, std = result
                     if acc is not None:
-                        accuracies.append(acc)
-                    
-                    # Cooldown between individual runs
-                    if i < RUNS_PER_CONFIG - 1:
-                        cooldown(COOLDOWN_PER_RUN, "Run Cooldown")
-
-                if accuracies:
-                    mean_acc = statistics.mean(accuracies)
-                    std_dev = statistics.stdev(accuracies) if len(accuracies) > 1 else 0.0
-                    
-                    # Save results
-                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    with open(OUTPUT_FILE, 'a', newline='') as csvfile:
-                        writer = csv.writer(csvfile)
-                        writer.writerow([current_time, script_name, dim, FIXED_BATCH_SIZE, f"{mean_acc:.3f}", f"{std_dev:.3f}", len(accuracies)])
-                    
-                    print(f"\n>>> Result: Dim={dim} | Mean Acc={mean_acc:.3f}% | Std Dev={std_dev:.3f}")
+                        # Save results
+                        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        with open(OUTPUT_FILE, 'a', newline='') as csvfile:
+                            writer = csv.writer(csvfile)
+                            # Note: Std Dev is unknown here as script only reports mean. Using 0.000 placeholder.
+                            # Runs is reported as 10 (hardcoded based on known internal logic)
+                            writer.writerow([current_time, script_name, dim, FIXED_BATCH_SIZE, f"{acc:.3f}", f"{std:.3f}", "10 (Internal)"])
+                        
+                        print(f"\n>>> Result: Dim={dim} | Mean Acc={acc:.3f}% | Std Dev={std:.3f}")
 
                 pbar_overall.update(1)
                 
                 # Cooldown after a set of runs (prevent thermal throttling)
-                cooldown(COOLDOWN_PER_SET, "Set Cooldown (Thermal Throttling Prevention)")
+                cooldown(COOLDOWN_PER_SET, "Set Cooldown")
 
         # --- Phase 2: Batch Size Sweep ---
         if RUN_PHASE_BS:
             print(f"\n\n=== Phase 2: Batch Size Sweep for {script_name} ===")
             for batch in BATCH_SIZE_SWEEP:
-                accuracies = []
+                result = run_script_realtime(script, FIXED_DIMENSION, batch)
                 
-                for i in range(RUNS_PER_CONFIG):
-                    print(f"\n--- Run {i+1}/{RUNS_PER_CONFIG} ---")
-                    acc = run_script_realtime(script, FIXED_DIMENSION, batch)
+                if result is not None:
+                    acc, std = result
                     if acc is not None:
-                        accuracies.append(acc)
-                    
-                    if i < RUNS_PER_CONFIG - 1:
-                        cooldown(COOLDOWN_PER_RUN, "Run Cooldown")
-
-                if accuracies:
-                    mean_acc = statistics.mean(accuracies)
-                    std_dev = statistics.stdev(accuracies) if len(accuracies) > 1 else 0.0
-                    
-                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    with open(OUTPUT_FILE, 'a', newline='') as csvfile:
-                        writer = csv.writer(csvfile)
-                        writer.writerow([current_time, script_name, FIXED_DIMENSION, batch, f"{mean_acc:.3f}", f"{std_dev:.3f}", len(accuracies)])
-                    
-                    print(f"\n>>> Result: Batch={batch} | Mean Acc={mean_acc:.3f}% | Std Dev={std_dev:.3f}")
+                        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        with open(OUTPUT_FILE, 'a', newline='') as csvfile:
+                            writer = csv.writer(csvfile)
+                            writer.writerow([current_time, script_name, FIXED_DIMENSION, batch, f"{acc:.3f}", f"{std:.3f}", "10 (Internal)"])
+                        
+                        print(f"\n>>> Result: Batch={batch} | Mean Acc={acc:.3f}% | Std Dev={std:.3f}")
                 
                 pbar_overall.update(1)
                 
-                cooldown(COOLDOWN_PER_SET, "Set Cooldown (Thermal Throttling Prevention)")
+                cooldown(COOLDOWN_PER_SET, "Set Cooldown")
 
     pbar_overall.close()
     print(f"\nAll Experiments Finished. Results saved to {OUTPUT_FILE}")

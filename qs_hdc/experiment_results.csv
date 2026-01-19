@@ -1,42 +1,64 @@
 Timestamp,Script,Dimensions,Batch_Size,Mean_Accuracy,Std_Dev,Runs
-2026-01-17 15:37:51,baseline_ucihar.py,1000,1,79.437,0.000,10
-2026-01-17 15:38:51,baseline_ucihar.py,2000,1,83.305,0.000,10
-2026-01-17 15:40:01,baseline_ucihar.py,4000,1,84.425,0.000,10
-2026-01-17 15:41:37,baseline_ucihar.py,6000,1,84.730,0.000,10
-2026-01-17 15:43:38,baseline_ucihar.py,8000,1,85.273,0.000,10
-2026-01-17 15:46:03,baseline_ucihar.py,10000,1,86.121,0.000,10
+2026-01-19 10:58:41,baseline_isolet.py,1000,1,81.770,1.587,10 (Internal)
+2026-01-19 10:59:05,baseline_isolet.py,2000,1,84.727,0.936,10 (Internal)
+2026-01-19 10:59:41,baseline_isolet.py,4000,1,85.831,0.926,10 (Internal)
+2026-01-19 11:00:38,baseline_isolet.py,6000,1,86.305,0.617,10 (Internal)
+2026-01-19 11:01:53,baseline_isolet.py,8000,1,86.722,0.669,10 (Internal)
+2026-01-19 11:03:23,baseline_isolet.py,10000,1,86.793,0.579,10 (Internal)
 
-2026-01-17 15:48:08,baseline_ucihar.py,4000,1,84.425,0.000,10
-2026-01-17 15:49:08,baseline_ucihar.py,4000,8,84.425,0.000,10
-2026-01-17 15:49:58,baseline_ucihar.py,4000,32,84.425,0.000,10
-2026-01-17 15:50:48,baseline_ucihar.py,4000,64,84.425,0.000,10
-2026-01-17 15:51:38,baseline_ucihar.py,4000,128,84.425,0.000,10
-2026-01-17 15:52:27,baseline_ucihar.py,4000,256,84.425,0.000,10
+2026-01-19 11:08:56,baseline_isolet.py,4000,1,85.831,0.926,10 (Internal)
+2026-01-19 11:09:24,baseline_isolet.py,4000,8,85.831,0.932,10 (Internal)
+2026-01-19 11:09:41,baseline_isolet.py,4000,32,85.831,0.932,10 (Internal)
+2026-01-19 11:09:56,baseline_isolet.py,4000,64,85.831,0.932,10 (Internal)
+2026-01-19 11:10:11,baseline_isolet.py,4000,128,85.831,0.932,10 (Internal)
+2026-01-19 11:10:26,baseline_isolet.py,4000,256,85.831,0.932,10 (Internal)
 
-2026-01-17 15:55:11,baseline_emg.py,1000,1,70.833,0.000,10
-2026-01-17 15:56:13,baseline_emg.py,2000,1,70.833,0.000,10
-2026-01-17 15:57:23,baseline_emg.py,4000,1,69.940,0.000,10
-2026-01-17 15:58:45,baseline_emg.py,6000,1,69.345,0.000,10
-2026-01-17 16:00:13,baseline_emg.py,8000,1,70.238,0.000,10
-2026-01-17 16:01:49,baseline_emg.py,10000,1,69.643,0.000,10
+2026-01-19 11:13:06,baseline_ucihar.py,1000,1,79.046,1.822,10 (Internal)
+2026-01-19 11:13:31,baseline_ucihar.py,2000,1,82.477,1.766,10 (Internal)
+2026-01-19 11:14:07,baseline_ucihar.py,4000,1,84.920,0.630,10 (Internal)
+2026-01-19 11:15:08,baseline_ucihar.py,6000,1,85.344,0.591,10 (Internal)
+2026-01-19 11:16:34,baseline_ucihar.py,8000,1,85.684,0.401,10 (Internal)
+2026-01-19 11:18:22,baseline_ucihar.py,10000,1,85.864,0.260,10 (Internal)
 
-2026-01-17 16:04:43,baseline_emg.py,4000,1,69.940,0.000,10
-2026-01-17 16:05:46,baseline_emg.py,4000,8,69.940,0.000,10
-2026-01-17 16:06:46,baseline_emg.py,4000,32,69.940,0.000,10
-2026-01-17 16:07:46,baseline_emg.py,4000,64,69.940,0.000,10
-2026-01-17 16:08:45,baseline_emg.py,4000,128,69.940,0.000,10
-2026-01-17 16:09:44,baseline_emg.py,4000,256,69.940,0.000,10
+2026-01-19 11:18:58,baseline_ucihar.py,4000,1,84.920,0.630,10 (Internal)
+2026-01-19 11:19:24,baseline_ucihar.py,4000,8,84.920,0.630,10 (Internal)
+2026-01-19 11:19:40,baseline_ucihar.py,4000,32,84.920,0.630,10 (Internal)
+2026-01-19 11:19:55,baseline_ucihar.py,4000,64,84.920,0.630,10 (Internal)
+2026-01-19 11:20:09,baseline_ucihar.py,4000,128,84.920,0.630,10 (Internal)
+2026-01-19 11:20:24,baseline_ucihar.py,4000,256,84.920,0.630,10 (Internal)
 
-2026-01-17 16:30:19,baseline_EuroLanguages.py,1000,1,27.205,0.000,10
-2026-01-17 16:49:13,baseline_EuroLanguages.py,2000,1,30.605,0.000,10
-2026-01-17 17:08:05,baseline_EuroLanguages.py,4000,1,36.190,0.000,10
-2026-01-17 17:28:05,baseline_EuroLanguages.py,6000,1,45.214,0.000,10
-2026-01-17 17:48:26,baseline_EuroLanguages.py,8000,1,52.190,0.000,10
-2026-01-17 18:09:24,baseline_EuroLanguages.py,10000,1,56.852,0.000,10
+2026-01-19 11:22:25,baseline_emg.py,1000,1,70.119,3.160,10 (Internal)
+2026-01-19 11:22:43,baseline_emg.py,2000,1,69.792,3.391,10 (Internal)
+2026-01-19 11:23:08,baseline_emg.py,4000,1,69.226,1.873,10 (Internal)
+2026-01-19 11:23:43,baseline_emg.py,6000,1,69.137,1.678,10 (Internal)
+2026-01-19 11:24:27,baseline_emg.py,8000,1,69.315,1.227,10 (Internal)
+2026-01-19 11:25:18,baseline_emg.py,10000,1,68.780,0.914,10 (Internal)
 
-2026-01-18 12:26:33,baseline_EuroLanguages.py,4000,1,36.190,0.000,10
-2026-01-18 12:42:58,baseline_EuroLanguages.py,4000,8,36.010,0.000,10
-2026-01-18 12:58:57,baseline_EuroLanguages.py,4000,32,36.010,0.000,10
-2026-01-18 13:14:52,baseline_EuroLanguages.py,4000,64,36.010,0.000,10
-2026-01-18 13:31:01,baseline_EuroLanguages.py,4000,128,36.010,0.000,10
-2026-01-18 13:47:10,baseline_EuroLanguages.py,4000,256,36.010,0.000,10
+2026-01-19 11:25:43,baseline_emg.py,4000,1,69.226,1.873,10 (Internal)
+2026-01-19 11:26:00,baseline_emg.py,4000,8,69.226,1.873,10 (Internal)
+2026-01-19 11:26:15,baseline_emg.py,4000,32,69.226,1.873,10 (Internal)
+2026-01-19 11:26:30,baseline_emg.py,4000,64,69.226,1.873,10 (Internal)
+2026-01-19 11:26:44,baseline_emg.py,4000,128,69.226,1.873,10 (Internal)
+2026-01-19 11:26:58,baseline_emg.py,4000,256,69.226,1.873,10 (Internal)
+
+2026-01-19 11:29:13,baseline_mnist.py,1000,1,76.973,0.905,10 (Internal)
+2026-01-19 11:31:10,baseline_mnist.py,2000,1,79.200,0.524,10 (Internal)
+2026-01-19 11:35:42,baseline_mnist.py,4000,1,80.584,0.341,10 (Internal)
+2026-01-19 11:45:04,baseline_mnist.py,6000,1,80.899,0.368,10 (Internal)
+2026-01-19 11:58:11,baseline_mnist.py,8000,1,81.109,0.236,10 (Internal)
+2026-01-19 12:14:21,baseline_mnist.py,10000,1,81.265,0.247,10 (Internal)
+
+2026-01-19 12:18:58,baseline_mnist.py,4000,1,80.584,0.341,10 (Internal)
+2026-01-19 12:21:30,baseline_mnist.py,4000,8,80.581,0.355,10 (Internal)
+2026-01-19 12:22:24,baseline_mnist.py,4000,32,80.581,0.355,10 (Internal)
+2026-01-19 12:23:12,baseline_mnist.py,4000,64,80.581,0.355,10 (Internal)
+2026-01-19 12:23:56,baseline_mnist.py,4000,128,80.581,0.355,10 (Internal)
+2026-01-19 12:24:39,baseline_mnist.py,4000,256,80.581,0.355,10 (Internal)
+
+2026-01-19 12:43:54,baseline_EuroLanguages.py,1000,1,22.639,6.249,10 (Internal)
+2026-01-19 13:07:13,baseline_EuroLanguages.py,2000,1,32.345,4.043,10 (Internal)
+2026-01-19 13:25:02,baseline_EuroLanguages.py,4000,1,43.286,3.632,10 (Internal)
+2026-01-19 13:44:33,baseline_EuroLanguages.py,6000,1,50.227,2.707,10 (Internal)
+2026-01-19 14:03:13,baseline_EuroLanguages.py,8000,1,54.092,2.237,10 (Internal)
+2026-01-19 14:23:44,baseline_EuroLanguages.py,10000,1,57.119,1.901,10 (Internal)
+2026-01-19 14:42:24,baseline_EuroLanguages.py,4000,1,43.286,3.632,10 (Internal)

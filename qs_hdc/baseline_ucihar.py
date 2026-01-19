@@ -4,10 +4,11 @@ import torchhd
 import torch.nn as nn
 from torchhd.datasets import UCIHAR
 from tqdm import tqdm
+import statistics
 
 import argparse
 
-torch.manual_seed(0)
+# torch.manual_seed(0)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using {device} device")
 
@@ -85,7 +86,21 @@ class Classifier(nn.Module):
                 n_total += labels.size(0)
         return n_correct / n_total
 
-model = Classifier(len(train_ds.classes), DIMENSIONS, INPUT_FEATURES, device=device)
-model.fit(train_ld)
-print("Testing model...")
-print(f"Testing accuracy of {model.accuracy(test_ld) * 100:.3f}%")
+accuracies = []
+for i in range(10):
+    torch.manual_seed(i)
+    print(f"\n--- Run {i+1}/10 (Seed={i}) ---")
+    
+    model = Classifier(len(train_ds.classes), DIMENSIONS, INPUT_FEATURES, device=device)
+    model.fit(train_ld)
+    
+    print("Testing model...")
+    acc = model.accuracy(test_ld)
+    accuracies.append(acc)
+    print(f"Run {i+1} Accuracy: {acc * 100:.3f}%")
+
+avg_acc = statistics.mean(accuracies)
+std_dev = statistics.stdev(accuracies) if len(accuracies) > 1 else 0.0
+
+print(f"\n>>> Average Accuracy over 10 runs: {avg_acc * 100:.3f}%")
+print(f">>> Std Dev: {std_dev * 100:.3f}")
