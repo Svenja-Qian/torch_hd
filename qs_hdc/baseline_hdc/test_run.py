@@ -12,9 +12,9 @@ from datetime import datetime
 # List of scripts to test. Uncomment to enable.
 TARGET_SCRIPTS = [
     # '/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_mnist.py',
-    # '/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_ucihar.py',
+     '/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_ucihar.py',
     # '/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_emg.py',
-     '/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_EuroLanguages.py',
+    # '/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_EuroLanguages.py',
     # '/Users/qianshen/torch_hd/torch_hd/qs_hdc/baseline_isolet.py',
 ]
 

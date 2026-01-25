@@ -61,4 +61,10 @@ Timestamp,Script,Dimensions,Batch_Size,Mean_Accuracy,Std_Dev,Runs
 2026-01-19 13:44:33,baseline_EuroLanguages.py,6000,1,50.227,2.707,10 (Internal)
 2026-01-19 14:03:13,baseline_EuroLanguages.py,8000,1,54.092,2.237,10 (Internal)
 2026-01-19 14:23:44,baseline_EuroLanguages.py,10000,1,57.119,1.901,10 (Internal)
+
 2026-01-19 14:42:24,baseline_EuroLanguages.py,4000,1,43.286,3.632,10 (Internal)
+2026-01-19 14:57:47,baseline_EuroLanguages.py,4000,8,43.420,3.697,10 (Internal)
+2026-01-19 15:13:48,baseline_EuroLanguages.py,4000,32,43.420,3.697,10 (Internal)
+2026-01-19 15:29:25,baseline_EuroLanguages.py,4000,64,43.420,3.697,10 (Internal)
+2026-01-19 15:45:11,baseline_EuroLanguages.py,4000,128,43.420,3.697,10 (Internal)
+2026-01-19 15:59:52,baseline_EuroLanguages.py,4000,256,43.420,3.697,10 (Internal)
