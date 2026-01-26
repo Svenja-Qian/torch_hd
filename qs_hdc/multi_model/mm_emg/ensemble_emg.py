@@ -1,13 +1,11 @@
+import os
 import torch
 import torchhd
 import torch.nn as nn
-import torchvision
-from torchvision.datasets import MNIST
+from torchhd.datasets import EMGHandGestures
 from tqdm import tqdm
-from torch import Tensor
 import statistics
 import csv
-import os
 import random
 from datetime import datetime
 
@@ -17,24 +15,28 @@ print(f"Using {device} device")
 
 # 定义要测试的维度
 DIMENSIONS_LIST = [1000, 2000, 4000, 6000, 8000, 10000]
-IMG_SIZE = 28
-BATCH_SIZE = 64
+INPUT_FEATURES = 1024  # 256 time steps * 4 channels
+BATCH_SIZE = 1
 
 # 路径设置
 BASE_DIR = os.path.abspath(".")
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
-OUTPUT_FILE = os.path.join(BASE_DIR, f"ensemble_mnist_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+OUTPUT_FILE = os.path.join(RESULTS_DIR, f"ensemble_emg_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
 
 # 确保目录存在
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# Load MNIST dataset
-transform = torchvision.transforms.ToTensor()
+# Load EMGHandGestures using absolute path
+data_dir = os.path.abspath("../data")
 
-train_ds = MNIST("../data", train=True, transform=transform, download=True)
+def transform(x):
+    return x.flatten()
+
+# Split subjects for training (0-3) and testing (4)
+train_ds = EMGHandGestures(data_dir, subjects=[0, 1, 2, 3], download=True, transform=transform)
 train_ld = torch.utils.data.DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
 
-test_ds = MNIST("../data", train=False, transform=transform, download=True)
+test_ds = EMGHandGestures(data_dir, subjects=[4], download=True, transform=transform)
 test_ld = torch.utils.data.DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
 
 class Classifier(nn.Module):
@@ -59,17 +61,10 @@ class Classifier(nn.Module):
         self.centroids = None
         self.is_fitted = False
 
-    def encode(self, x: Tensor) -> torchhd.BSCTensor:
-        # Flatten input
-        x = x.view(x.size(0), -1)
+    def encode(self, x):
+        # Center input, project, then binarize (BSCTensor)
         # 输入数据中心化 (对 FPGA 友好，且有助于二值化)
-        x = x - 0.5
-        
-        # Project to high-dimensional space
-        sample_hv = self.projection(x)
-        # Binarize (threshold > 0)
-        # 二值化处理：大于0设为True，否则为False (BSCTensor)
-        return torchhd.BSCTensor(sample_hv > 0)
+        return torchhd.BSCTensor(self.projection(x - 0.5) > 0)
 
     def fit(self, data_loader):
         print("Training model...")
@@ -183,7 +178,7 @@ for dim in tqdm(DIMENSIONS_LIST, desc="Dimensions"):
         for seed in seeds:
             torch.manual_seed(seed)
             print(f"Training model with seed {seed}...")
-            model = Classifier(len(train_ds.classes), dim, IMG_SIZE * IMG_SIZE, device=device)
+            model = Classifier(len(train_ds.classes), dim, INPUT_FEATURES, device=device)
             model.fit(train_ld)
             models.append(model)
         

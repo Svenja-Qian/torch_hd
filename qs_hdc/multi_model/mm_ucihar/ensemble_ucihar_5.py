@@ -1,8 +1,7 @@
 import torch
 import torchhd
 import torch.nn as nn
-import torchvision
-from torchvision.datasets import MNIST
+from torchhd.datasets import UCIHAR
 from tqdm import tqdm
 from torch import Tensor
 import statistics
@@ -17,24 +16,23 @@ print(f"Using {device} device")
 
 # 定义要测试的维度
 DIMENSIONS_LIST = [1000, 2000, 4000, 6000, 8000, 10000]
-IMG_SIZE = 28
-BATCH_SIZE = 64
+INPUT_FEATURES = 561
+BATCH_SIZE = 1
 
 # 路径设置
 BASE_DIR = os.path.abspath(".")
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
-OUTPUT_FILE = os.path.join(BASE_DIR, f"ensemble_mnist_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+OUTPUT_FILE = os.path.join(RESULTS_DIR, f"ensemble_ucihar_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
 
 # 确保目录存在
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# Load MNIST dataset
-transform = torchvision.transforms.ToTensor()
-
-train_ds = MNIST("../data", train=True, transform=transform, download=True)
+# Load UCIHAR dataset
+data_dir = os.path.join(BASE_DIR, "data")
+train_ds = UCIHAR(data_dir, train=True, download=True)
 train_ld = torch.utils.data.DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
 
-test_ds = MNIST("../data", train=False, transform=transform, download=True)
+test_ds = UCIHAR(data_dir, train=False, download=True)
 test_ld = torch.utils.data.DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
 
 class Classifier(nn.Module):
@@ -60,8 +58,9 @@ class Classifier(nn.Module):
         self.is_fitted = False
 
     def encode(self, x: Tensor) -> torchhd.BSCTensor:
-        # Flatten input
-        x = x.view(x.size(0), -1)
+        # UCIHAR input is already flattened (batch_size, 561)
+        # x = x.view(x.size(0), -1) 
+        
         # 输入数据中心化 (对 FPGA 友好，且有助于二值化)
         x = x - 0.5
         
@@ -168,22 +167,22 @@ ensemble_results = []
 for dim in tqdm(DIMENSIONS_LIST, desc="Dimensions"):
     print(f"\n=== Testing Dimension: {dim} ===")
     
-    # 生成10组随机seed，每组3个不重复的seed（0~9之间）
+    # 生成10组随机seed，每组5个不重复的seed（0~9之间）
     seed_groups = []
     for _ in range(10):
-        seeds = random.sample(range(10), 3)
+        seeds = random.sample(range(10), 5)
         seed_groups.append(seeds)
     
     accuracies = []
     for i, seeds in enumerate(seed_groups):
         print(f"\n--- Run {i+1}/10 (Seeds={seeds}) ---")
         
-        # 训练三个不同seed的模型
+        # 训练五个不同seed的模型
         models = []
         for seed in seeds:
             torch.manual_seed(seed)
             print(f"Training model with seed {seed}...")
-            model = Classifier(len(train_ds.classes), dim, IMG_SIZE * IMG_SIZE, device=device)
+            model = Classifier(len(train_ds.classes), dim, INPUT_FEATURES, device=device)
             model.fit(train_ld)
             models.append(model)
         

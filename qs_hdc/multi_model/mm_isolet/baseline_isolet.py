@@ -1,14 +1,12 @@
 import torch
 import torchhd
 import torch.nn as nn
-import torchvision
-from torchvision.datasets import MNIST
+from torchhd.datasets import ISOLET
 from tqdm import tqdm
 from torch import Tensor
 import statistics
 import csv
 import os
-import random
 from datetime import datetime
 
 # torch.manual_seed(0)
@@ -17,24 +15,23 @@ print(f"Using {device} device")
 
 # 定义要测试的维度
 DIMENSIONS_LIST = [1000, 2000, 4000, 6000, 8000, 10000]
-IMG_SIZE = 28
-BATCH_SIZE = 64
+INPUT_FEATURES = 617
+BATCH_SIZE = 1
 
 # 路径设置
 BASE_DIR = os.path.abspath(".")
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
-OUTPUT_FILE = os.path.join(BASE_DIR, f"ensemble_mnist_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+OUTPUT_FILE = os.path.join(RESULTS_DIR, f"baseline_isolet_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
 
 # 确保目录存在
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# Load MNIST dataset
-transform = torchvision.transforms.ToTensor()
-
-train_ds = MNIST("../data", train=True, transform=transform, download=True)
+# Load ISOLET dataset
+# transform is not needed for ISOLET as it returns features directly
+train_ds = ISOLET("../data", train=True, download=True)
 train_ld = torch.utils.data.DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
 
-test_ds = MNIST("../data", train=False, transform=transform, download=True)
+test_ds = ISOLET("../data", train=False, download=True)
 test_ld = torch.utils.data.DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
 
 class Classifier(nn.Module):
@@ -60,8 +57,9 @@ class Classifier(nn.Module):
         self.is_fitted = False
 
     def encode(self, x: Tensor) -> torchhd.BSCTensor:
-        # Flatten input
-        x = x.view(x.size(0), -1)
+        # ISOLET input is already features (batch_size, 617)
+        # No need to flatten
+        
         # 输入数据中心化 (对 FPGA 友好，且有助于二值化)
         x = x - 0.5
         
@@ -117,83 +115,26 @@ class Classifier(nn.Module):
                 n_total += labels.size(0)
         return n_correct / n_total
 
-# 投票预测函数
-def vote_predict(models, samples):
-    # 收集所有模型的预测结果
-    predictions = []
-    for model in models:
-        pred = model.predict(samples)
-        predictions.append(pred)
-    
-    # 转换为张量
-    predictions = torch.stack(predictions)
-    
-    # 对每个样本进行投票
-    # 对于每个样本，统计每个类别的投票数
-    batch_size = samples.size(0)
-    voted_predictions = torch.zeros(batch_size, dtype=torch.long, device=device)
-    
-    for i in range(batch_size):
-        # 获取所有模型对第i个样本的预测
-        sample_preds = predictions[:, i]
-        # 统计每个类别的出现次数
-        counts = torch.bincount(sample_preds)
-        # 选择出现次数最多的类别
-        voted_predictions[i] = torch.argmax(counts)
-    
-    return voted_predictions
-
-# 投票模型的准确率计算
-def vote_accuracy(models, data_loader):
-    n_correct = 0
-    n_total = 0
-    with torch.no_grad():
-        for samples, labels in tqdm(data_loader, desc="Testing Ensemble"):
-            samples = samples.to(device).float()
-            labels = labels.to(device)
-            
-            # 使用投票预测
-            predictions = vote_predict(models, samples)
-            
-            # 计算正确预测的数量
-            n_correct += torch.sum(predictions == labels).item()
-            n_total += labels.size(0)
-    
-    return n_correct / n_total
-
 # 存储所有结果
-ensemble_results = []
+baseline_results = []
 
 # 对每个维度进行测试
 for dim in tqdm(DIMENSIONS_LIST, desc="Dimensions"):
     print(f"\n=== Testing Dimension: {dim} ===")
     
-    # 生成10组随机seed，每组3个不重复的seed（0~9之间）
-    seed_groups = []
-    for _ in range(10):
-        seeds = random.sample(range(10), 3)
-        seed_groups.append(seeds)
-    
     accuracies = []
-    for i, seeds in enumerate(seed_groups):
-        print(f"\n--- Run {i+1}/10 (Seeds={seeds}) ---")
+    for i in range(10):
+        torch.manual_seed(i)
+        print(f"\n--- Run {i+1}/10 (Seed={i}) ---")
         
-        # 训练三个不同seed的模型
-        models = []
-        for seed in seeds:
-            torch.manual_seed(seed)
-            print(f"Training model with seed {seed}...")
-            model = Classifier(len(train_ds.classes), dim, IMG_SIZE * IMG_SIZE, device=device)
-            model.fit(train_ld)
-            models.append(model)
+        model = Classifier(len(train_ds.classes), dim, INPUT_FEATURES, device=device)
+        model.fit(train_ld)
         
-        # 测试投票模型
-        print("Testing ensemble model...")
-        acc = vote_accuracy(models, test_ld)
+        print("Testing model...")
+        acc = model.accuracy(test_ld)
         accuracies.append(acc)
         print(f"Run {i+1} Accuracy: {acc * 100:.3f}%")
     
-    # 计算统计信息
     avg_acc = statistics.mean(accuracies)
     min_acc = min(accuracies)
     max_acc = max(accuracies)
@@ -205,7 +146,7 @@ for dim in tqdm(DIMENSIONS_LIST, desc="Dimensions"):
     print(f">>> Std Dev: {std_dev * 100:.3f}")
     
     # 存储结果
-    ensemble_results.append({
+    baseline_results.append({
         "dimension": dim,
         "avg_accuracy": avg_acc,
         "min_accuracy": min_acc,
@@ -219,7 +160,7 @@ with open(OUTPUT_FILE, 'w', newline='') as csvfile:
     # 写入表头
     writer.writerow(['Dimension', 'Average Accuracy (%)', 'Min Accuracy (%)', 'Max Accuracy (%)', 'Std Dev (%)'])
     # 写入每个维度的结果
-    for result in ensemble_results:
+    for result in baseline_results:
         writer.writerow([
             result["dimension"],
             f'{result["avg_accuracy"] * 100:.3f}',

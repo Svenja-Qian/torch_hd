@@ -6,14 +6,14 @@ from datetime import datetime
 # 路径设置
 BASE_DIR = os.path.abspath(".")
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
-OUTPUT_IMAGE = os.path.join(BASE_DIR, f"mnist_comparison_plot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+OUTPUT_IMAGE = os.path.join(RESULTS_DIR, f"mnist_comparison_plot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
 
 # 确保目录存在
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # 手动指定CSV文件路径（根据实际生成的文件名修改）
-baseline_csv = os.path.join(BASE_DIR, "baseline_mnist_results_20260125_223424.csv")
-ensemble_csv = os.path.join(BASE_DIR, "ensemble_mnist_results_20260125_223424.csv")
+baseline_csv = os.path.join(RESULTS_DIR, "baseline_mnist_results_20260125_223727.csv")
+ensemble_csv = os.path.join(RESULTS_DIR, "ensemble_mnist_results_20260125_232916.csv")
 
 # 读取基准模型结果
 baseline_data = {}
