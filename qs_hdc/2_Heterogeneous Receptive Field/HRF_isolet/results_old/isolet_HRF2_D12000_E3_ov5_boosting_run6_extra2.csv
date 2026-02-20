@@ -1,0 +1,2 @@
+D_total,E,dims,run_time,overlap_ratio,num_runs,weighting,num_extra_trials,acc_baseline_mean,acc_ensemble_mean,acc_e0_mean,acc_e1_mean,acc_e2_mean
+12000,3,"[4000, 4000, 4000]",6,0.05,1,boosting,2,0.8588838999358563,0.8838999358563181,0.5240538806927517,0.7812700449005773,0.7665169980756895
