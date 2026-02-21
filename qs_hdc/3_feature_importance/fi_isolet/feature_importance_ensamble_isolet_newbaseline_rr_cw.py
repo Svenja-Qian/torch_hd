@@ -3,6 +3,8 @@ import os
 import csv
 import json
 import random
+import sys
+from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
@@ -12,6 +14,13 @@ import torch.nn as nn
 import torchhd
 from torch import Tensor
 from torchhd.datasets import ISOLET
+
+current_dir = Path(__file__).resolve().parent
+parent_dir = current_dir.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
+
+import index
 
 
 INPUT_FEATURES = 617
@@ -114,8 +123,7 @@ def load_feature_importance_indices(
     if feature_indices.shape[0] > n_features:
         feature_indices = feature_indices[:n_features]
     common_count = max(1, int(n_features * common_ratio))
-    features_per_expert = max(1, int(n_features * per_expert_ratio))
-    unique_per_expert = max(0, features_per_expert - common_count)
+    unique_per_expert = max(1, int(n_features * per_expert_ratio))
     common_indices = feature_indices[:common_count]
     remaining = feature_indices[common_count:]
     total_unique_needed = unique_per_expert * E
@@ -207,6 +215,122 @@ def soft_vote_weighted(
     return torch.argmax(acc_sim, dim=-1)
 
 
+def topk_margin(scores: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+    if scores.dim() == 1:
+        scores = scores.unsqueeze(0)
+    top2, _ = torch.topk(scores, k=2, dim=-1, largest=True, sorted=True)
+    top1 = top2[..., 0]
+    top2_val = top2[..., 1]
+    margin = top1 - top2_val
+    return top1, top2_val, margin
+
+
+def confidence_weighted_vote(
+    experts: List[Classifier],
+    samples: Tensor,
+    base_weights: torch.Tensor,
+    mode: str,
+    tau: float,
+    clamp_max: float,
+    margin_bins: torch.Tensor,
+    expert_margin_th: float,
+):
+    device = samples.device
+    E = len(experts)
+    all_margins = []
+    all_confs = []
+    acc_sim = None
+    for i, model in enumerate(experts):
+        scores_i = model(samples)
+        top1_i, _, margin_i = topk_margin(scores_i)
+        top1_i = top1_i.to(torch.float32)
+        margin_i = margin_i.to(torch.float32)
+        if mode == "top1":
+            base_val = top1_i
+        elif mode == "hybrid":
+            base_val = 0.5 * (top1_i + margin_i)
+        else:
+            base_val = margin_i
+        t0, t1, t2 = margin_bins[0], margin_bins[1], margin_bins[2]
+        conf_i = torch.zeros_like(base_val, device=device)
+        conf_i = conf_i + (base_val >= t0).float()
+        conf_i = conf_i + (base_val >= t1).float()
+        conf_i = conf_i + (base_val >= t2).float()
+        if expert_margin_th > 0.0:
+            conf_i = conf_i * (margin_i >= expert_margin_th).float()
+        if tau != 1.0:
+            conf_i = conf_i * float(tau)
+        if clamp_max > 0.0:
+            conf_i = torch.clamp(conf_i, max=float(clamp_max))
+        all_margins.append(margin_i)
+        all_confs.append(conf_i)
+        w_eff = base_weights[i] * conf_i
+        w_eff = w_eff.unsqueeze(-1)
+        weighted_scores = scores_i * w_eff
+        acc_sim = weighted_scores if acc_sim is None else acc_sim + weighted_scores
+    if acc_sim is None:
+        raise RuntimeError("No experts provided for confidence_weighted_vote.")
+    conf_matrix = torch.stack(all_confs, dim=0)
+    active_matrix = conf_matrix > 0.0
+    active_counts_per_sample = active_matrix.sum(dim=0).to(torch.float32)
+    avg_active_experts = float(active_counts_per_sample.mean().item())
+    preds = torch.argmax(acc_sim, dim=-1)
+    debug = {
+        "scores": acc_sim,
+        "per_expert_mean_margin": [float(m.mean().item()) for m in all_margins],
+        "per_expert_mean_conf": [float(c.mean().item()) for c in all_confs],
+        "active_experts_per_sample": active_counts_per_sample.detach().cpu(),
+        "avg_active_experts": avg_active_experts,
+    }
+    return preds, debug
+
+
+def predict_with_filter(
+    experts: List[Classifier],
+    baseline: Classifier,
+    samples: Tensor,
+    base_weights: torch.Tensor,
+    cfg: dict,
+):
+    device = samples.device
+    margin_bins = torch.tensor(
+        cfg["margin_bins"], dtype=torch.float32, device=device
+    )
+    preds_ens, debug = confidence_weighted_vote(
+        experts=experts,
+        samples=samples,
+        base_weights=base_weights,
+        mode=cfg["conf_vote_mode"],
+        tau=float(cfg["conf_tau"]),
+        clamp_max=float(cfg["conf_clamp_max"]),
+        margin_bins=margin_bins,
+        expert_margin_th=float(cfg["expert_margin_th"]),
+    )
+    scores = debug["scores"]
+    top1, _, ens_margin = topk_margin(scores)
+    ens_margin_th = float(cfg["ens_margin_th"])
+    is_confident = ens_margin >= ens_margin_th
+    use_baseline_fallback = bool(cfg["use_baseline_fallback"])
+    if use_baseline_fallback:
+        pred_base = baseline.predict(samples)
+        pred_final = torch.where(is_confident, preds_ens, pred_base)
+        fallback_used = ~is_confident
+    else:
+        pred_final = preds_ens
+        fallback_used = ~is_confident
+    info = {
+        "is_confident": is_confident.detach().cpu(),
+        "fallback_used": fallback_used.detach().cpu(),
+        "ens_margin": ens_margin.detach().cpu(),
+        "ens_top1": top1.detach().cpu(),
+        "active_experts_per_sample": debug[
+            "active_experts_per_sample"
+        ],
+        "avg_active_experts": debug["avg_active_experts"],
+    }
+    return pred_final, info
+
+
 def train_experts_boosting(
     E: int,
     partitions: List[np.ndarray],
@@ -288,6 +412,7 @@ def run_experiment(
     importance_csv_path: str,
     common_ratio: float,
     per_expert_ratio: float,
+    conf_cfg: dict,
 ):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     results_dir = os.path.join(base_dir, "results")
@@ -315,10 +440,11 @@ def run_experiment(
     sorted_all = parse_sorted_feature_indices(
         csv_path=importance_csv_path, n_features=INPUT_FEATURES
     )
+    baseline_k_global = len(partitions[0])
+    hw_bits = index.compute_hardware_bits(dims, partitions, E, NUM_CLASSES, D_total, baseline_k_global)
 
-    baseline_accs: List[float] = []
-    ensemble_accs: List[float] = []
-    expert_accs_runs: List[List[float]] = []
+    runs_metrics: List[dict] = []
+    seeds_list: List[List[int]] = []
 
     print(
         f"Starting {num_runs} runs (D_total={D_total}, E={E}, weighting={weighting})",
@@ -391,65 +517,188 @@ def run_experiment(
             else:
                 w = torch.ones(E, device=device, dtype=torch.float32) / E
 
-        n_correct = 0
-        n_total = 0
-        expert_accs_test = [0 for _ in range(E)]
-        with torch.no_grad():
-            for samples, labels in test_ld:
-                samples = samples.to(device).float()
-                labels = labels.to(device)
-                pred_ens = soft_vote_weighted(experts, samples, w)
-                n_correct += torch.sum(pred_ens == labels).item()
-                n_total += labels.size(0)
-                for e in range(E):
-                    pred_e = experts[e].predict(samples)
-                    expert_accs_test[e] += torch.sum(pred_e == labels).item()
+        metrics = index.evaluate_run(
+            experts, baseline, w, test_ld, device, NUM_CLASSES
+        )
 
-        ens_acc = n_correct / n_total
-        expert_accs = [x / n_total for x in expert_accs_test]
-
-        baseline_accs.append(base_acc)
-        ensemble_accs.append(ens_acc)
-        expert_accs_runs.append(expert_accs)
+        if conf_cfg.get("use_conf_weighted_vote", False):
+            margin_bins_np = conf_cfg.get("margin_bins", [2.0, 5.0, 10.0])
+            acc_drop_tolerance = 0.002
+            all_val_margins = []
+            all_val_labels = []
+            all_val_ens_preds = []
+            all_val_base_preds = []
+            with torch.no_grad():
+                for samples_val, labels_val in val_ld:
+                    samples_val = samples_val.to(device).float()
+                    labels_val = labels_val.to(device)
+                    margin_bins_tensor = torch.tensor(
+                        margin_bins_np, dtype=torch.float32, device=device
+                    )
+                    preds_val_ens, debug_val = confidence_weighted_vote(
+                        experts=experts,
+                        samples=samples_val,
+                        base_weights=w,
+                        mode=conf_cfg["conf_vote_mode"],
+                        tau=float(conf_cfg["conf_tau"]),
+                        clamp_max=float(conf_cfg["conf_clamp_max"]),
+                        margin_bins=margin_bins_tensor,
+                        expert_margin_th=float(conf_cfg["expert_margin_th"]),
+                    )
+                    scores_val = debug_val["scores"]
+                    top1_val, _, margin_val = topk_margin(scores_val)
+                    pred_val_base = baseline.predict(samples_val)
+                    all_val_margins.append(margin_val.detach().cpu().numpy())
+                    all_val_labels.append(labels_val.detach().cpu().numpy())
+                    all_val_ens_preds.append(preds_val_ens.detach().cpu().numpy())
+                    all_val_base_preds.append(pred_val_base.detach().cpu().numpy())
+            if all_val_labels:
+                val_margins_np = np.concatenate(all_val_margins, axis=0)
+                val_labels_np = np.concatenate(all_val_labels, axis=0)
+                val_ens_preds_np = np.concatenate(all_val_ens_preds, axis=0)
+                val_base_preds_np = np.concatenate(all_val_base_preds, axis=0)
+                ens_acc_val = float(
+                    np.mean(val_ens_preds_np == val_labels_np)
+                )
+                if conf_cfg.get("ens_margin_th", -1.0) >= 0.0:
+                    best_th = float(conf_cfg["ens_margin_th"])
+                    best_fallback_rate = float(0.0)
+                    best_acc_filtered = ens_acc_val
+                else:
+                    percentiles = [50, 60, 70, 80, 90, 95]
+                    cand_ths = sorted(
+                        set(
+                            float(np.percentile(val_margins_np, p))
+                            for p in percentiles
+                        )
+                    )
+                    if not cand_ths:
+                        cand_ths = [0.0]
+                    best_th = cand_ths[0]
+                    best_fallback_rate = -1.0
+                    best_acc_filtered = ens_acc_val
+                    for th in cand_ths:
+                        mask_conf = val_margins_np >= th
+                        if conf_cfg.get("use_baseline_fallback", True):
+                            final_preds = np.where(
+                                mask_conf, val_ens_preds_np, val_base_preds_np
+                            )
+                        else:
+                            final_preds = val_ens_preds_np
+                        acc_th = float(
+                            np.mean(final_preds == val_labels_np)
+                        )
+                        fallback_rate_th = float(
+                            np.mean(~mask_conf)
+                        )
+                        if acc_th >= ens_acc_val - acc_drop_tolerance:
+                            if fallback_rate_th > best_fallback_rate:
+                                best_fallback_rate = fallback_rate_th
+                                best_th = float(th)
+                                best_acc_filtered = acc_th
+                conf_cfg_run = dict(conf_cfg)
+                conf_cfg_run["ens_margin_th"] = best_th
+                total_filtered_correct = 0
+                total_filtered = 0
+                all_fb_flags = []
+                all_conf_flags = []
+                all_active_counts = []
+                with torch.no_grad():
+                    for samples_te, labels_te in test_ld:
+                        samples_te = samples_te.to(device).float()
+                        labels_te = labels_te.to(device)
+                        preds_filtered, info = predict_with_filter(
+                            experts=experts,
+                            baseline=baseline,
+                            samples=samples_te,
+                            base_weights=w,
+                            cfg=conf_cfg_run,
+                        )
+                        total_filtered_correct += torch.sum(
+                            preds_filtered == labels_te
+                        ).item()
+                        total_filtered += labels_te.size(0)
+                        all_fb_flags.append(
+                            info["fallback_used"].numpy().astype(np.bool_)
+                        )
+                        all_conf_flags.append(
+                            info["is_confident"].numpy().astype(np.bool_)
+                        )
+                        all_active_counts.append(
+                            info["active_experts_per_sample"].numpy().astype(
+                                np.float32
+                            )
+                        )
+                if total_filtered > 0:
+                    filtered_acc = total_filtered_correct / total_filtered
+                else:
+                    filtered_acc = 0.0
+                if all_fb_flags:
+                    fb_vec = np.concatenate(all_fb_flags, axis=0)
+                    conf_vec = np.concatenate(all_conf_flags, axis=0)
+                    active_vec = np.concatenate(
+                        all_active_counts, axis=0
+                    )
+                    fallback_rate_test = float(np.mean(fb_vec))
+                    confident_rate_test = float(np.mean(conf_vec))
+                    avg_active_experts_test = float(
+                        np.mean(active_vec)
+                    )
+                else:
+                    fallback_rate_test = 0.0
+                    confident_rate_test = 0.0
+                    avg_active_experts_test = 0.0
+                metrics["filtered_ens_acc"] = filtered_acc
+                metrics["val_ens_acc_conf_vote"] = ens_acc_val
+                metrics["val_filtered_acc_best"] = best_acc_filtered
+                metrics["val_fallback_rate_best"] = best_fallback_rate
+                metrics["ens_margin_th_used"] = best_th
+                metrics["fallback_rate_test"] = fallback_rate_test
+                metrics["confident_rate_test"] = confident_rate_test
+                metrics["avg_active_experts_test"] = avg_active_experts_test
+                print(
+                    f"Confidence-filtered ensemble -> acc={filtered_acc:.4f}, "
+                    f"val_acc_no_filter={ens_acc_val:.4f}, "
+                    f"val_acc_filtered_best={best_acc_filtered:.4f}, "
+                    f"val_fallback_rate_best={best_fallback_rate:.4f}, "
+                    f"ens_margin_th_used={best_th:.4f}"
+                )
+                print(
+                    f"Test fallback_rate={fallback_rate_test:.4f}, "
+                    f"confident_rate={confident_rate_test:.4f}, "
+                    f"avg_active_experts={avg_active_experts_test:.4f}"
+                )
+        runs_metrics.append(metrics)
+        seeds_list.append([baseline_seed] + expert_seeds)
 
         print(
             f"[Run {r + 1}/{num_runs}] "
-            f"baseline_acc={base_acc:.4f}, ensemble_acc={ens_acc:.4f}",
+            f"baseline_seed={baseline_seed}, expert_seeds={expert_seeds}, "
+            f"baseline_acc={metrics['base_acc']:.4f}, ensemble_acc={metrics['ens_acc']:.4f}",
             flush=True,
         )
+        index.print_run_metrics(metrics, hw_bits)
 
-    base_acc_mean = float(np.mean(baseline_accs))
-    ens_acc_mean = float(np.mean(ensemble_accs))
-    expert_accs_mean = list(np.mean(np.array(expert_accs_runs), axis=0))
-
-    row = {
-        "D_total": D_total,
-        "E": E,
-        "dims": json.dumps(dims),
-        "run_time": run_time,
-        "overlap_ratio": common_ratio,
-        "num_runs": num_runs,
-        "weighting": weighting,
-        "importance_csv": importance_csv_path,
-        "common_ratio": common_ratio,
-        "per_expert_ratio": per_expert_ratio,
-        "baseline_k": baseline_k,
-        "acc_baseline_mean": base_acc_mean,
-        "acc_ensemble_mean": ens_acc_mean,
-    }
-    for i, acc in enumerate(expert_accs_mean):
-        row[f"acc_e{i}_mean"] = float(acc)
-
-    write_header = not os.path.exists(results_csv_path)
-    with open(results_csv_path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if write_header:
-            writer.writeheader()
-        writer.writerow(row)
-
-    print(f"Baseline mean accuracy: {base_acc_mean:.4f}")
-    print(f"Ensemble mean accuracy: {ens_acc_mean:.4f}")
-    for i, acc in enumerate(expert_accs_mean):
+    agg = index.aggregate_runs(runs_metrics)
+    index.write_csv_row(
+        results_csv_path=results_csv_path,
+        dims=dims,
+        E=E,
+        D_total=D_total,
+        run_time=run_time,
+        weighting=weighting,
+        importance_csv_path=importance_csv_path,
+        common_ratio=common_ratio,
+        per_expert_ratio=per_expert_ratio,
+        baseline_k=baseline_k_global,
+        seeds_list=seeds_list,
+        agg=agg,
+        hw_bits=hw_bits,
+        num_runs=num_runs,
+    )
+    print(f"Baseline mean accuracy: {agg['acc_baseline_mean']:.4f}, std: {agg['acc_baseline_std']:.4f}")
+    print(f"Ensemble mean accuracy: {agg['acc_ensemble_mean']:.4f}, std: {agg['acc_ensemble_std']:.4f}")
+    for i, acc in enumerate(agg['expert_accs_mean']):
         print(f"Expert {i} mean accuracy: {acc:.4f}")
     print(f"Saved summary to: {results_csv_path}")
 
@@ -469,11 +718,33 @@ def main():
     parser.add_argument(
         "--importance_csv",
         type=str,
-        default="./rf_feature_importance_results/isolet_feature_importance.csv",
+        default="../rf_feature_importance_results/isolet_feature_importance.csv",
     )
     parser.add_argument("--common_ratio", type=float, default=0.10)
-    parser.add_argument("--per_expert_ratio", type=float, default=0.30)
+    parser.add_argument("--per_expert_ratio", type=float, default=0.20)
     parser.add_argument("--baseline_k_mode", type=str, default="first", choices=["first", "avg"])
+    parser.add_argument(
+        "--use_conf_weighted_vote", type=int, default=1
+    )
+    parser.add_argument("--ens_margin_th", type=float, default=-1.0)
+    parser.add_argument("--expert_margin_th", type=float, default=0.0)
+    parser.add_argument(
+        "--use_baseline_fallback", type=int, default=1
+    )
+    parser.add_argument(
+        "--margin_bins",
+        type=float,
+        nargs=3,
+        default=[2.0, 5.0, 10.0],
+    )
+    parser.add_argument(
+        "--conf_vote_mode",
+        type=str,
+        default="margin",
+        choices=["margin", "top1", "hybrid"],
+    )
+    parser.add_argument("--conf_tau", type=float, default=1.0)
+    parser.add_argument("--conf_clamp_max", type=float, default=3.0)
     args = parser.parse_args()
 
     if args.E != 3:
@@ -493,9 +764,19 @@ def main():
     results_dir = os.path.join(base_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
     effective_num_runs = args.runs if args.runs is not None else args.num_runs
+    conf_cfg = {
+        "use_conf_weighted_vote": bool(args.use_conf_weighted_vote),
+        "ens_margin_th": args.ens_margin_th,
+        "expert_margin_th": args.expert_margin_th,
+        "use_baseline_fallback": bool(args.use_baseline_fallback),
+        "margin_bins": args.margin_bins,
+        "conf_vote_mode": args.conf_vote_mode,
+        "conf_tau": args.conf_tau,
+        "conf_clamp_max": args.conf_clamp_max,
+    }
     results_path = os.path.join(
         results_dir,
-        f"isolet_HRF_feature_importance_D{args.D_total}_E{args.E}_common{int(args.common_ratio*100)}_per{int(args.per_expert_ratio*100)}_{args.weighting}_run{args.run_time}.csv",
+        f"isolet_fi_cw_D{args.D_total}_E{args.E}_{args.weighting}_rr{int(args.per_expert_ratio * 100)}_run{args.run_time}.csv",
     )
     run_experiment(
         D_total=args.D_total,
@@ -509,6 +790,7 @@ def main():
         importance_csv_path=importance_csv_path,
         common_ratio=args.common_ratio,
         per_expert_ratio=args.per_expert_ratio,
+        conf_cfg=conf_cfg,
     )
 
 

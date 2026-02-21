@@ -1,2 +1,0 @@
-D_total,E,dims,run_time,overlap_ratio,num_runs,weighting,importance_csv,common_ratio,per_expert_ratio,baseline_k,acc_baseline_mean,acc_ensemble_mean,acc_e0_mean,acc_e1_mean,acc_e2_mean
-9000,3,"[3000, 3000, 3000]",0,0.1,10,boosting,/Users/qianshen/torch_hd/torch_hd/qs_hdc/3_feature_importance/rf_feature_importance_results/isolet_feature_importance.csv,0.1,0.3,185,0.8875561257216165,0.9057087876844129,0.8491982039769083,0.8821680564464399,0.8605516356638873

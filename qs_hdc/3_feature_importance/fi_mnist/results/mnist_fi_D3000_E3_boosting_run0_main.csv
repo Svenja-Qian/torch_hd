@@ -1,0 +1,2 @@
+D_total,E,num_runs,acc_baseline_mean,acc_baseline_std,acc_ensemble_mean,acc_ensemble_std,acc_e0_mean,acc_e1_mean,acc_e2_mean
+3000,3,10,0.7925099999999999,0.0028165404310962865,0.8036199999999999,0.005513583226904254,0.76335,0.7689999999999999,0.78661
