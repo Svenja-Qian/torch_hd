@@ -8,6 +8,7 @@ import torchvision
 from torchvision.datasets import MNIST
 from torchhd.datasets.isolet import ISOLET
 from torchhd.datasets.ucihar import UCIHAR
+from torchhd.datasets.cardiotocography_3clases import Cardiotocography3Clases
 from torchhd.datasets import EMGHandGestures
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
@@ -70,6 +71,13 @@ def load_emg(root):
     feat_names = [f"emg_{i}" for i in range(X.shape[1])]
     return X, y, feat_names
 
+def load_cardio(root):
+    train_ds = Cardiotocography3Clases(root, train=True, fold=0, download=True)
+    X = train_ds.data.float().numpy()
+    y = train_ds.targets.long().numpy()
+    feat_names = [f"cardio_{i}" for i in range(X.shape[1])]
+    return X, y, feat_names
+
 def save_results(df, out_csv):
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
     df.to_csv(out_csv, index=False)
@@ -114,11 +122,21 @@ def run_emg(data_root, results_dir, n_estimators):
     _, df = compute_importances(X, y, feature_names=feat_names, n_estimators=n_estimators)
     save_results(df, os.path.join(results_dir, "emg_feature_importance.csv"))
 
+def run_cardio(data_root, results_dir, n_estimators):
+    print("[Dataset] Cardio: loading data...", flush=True)
+    X, y, feat_names = load_cardio(data_root)
+    print(f"[Dataset] Cardio: data loaded (n_samples={X.shape[0]}, n_features={X.shape[1]})", flush=True)
+    _, df = compute_importances(X, y, feature_names=feat_names, n_estimators=n_estimators)
+    save_results(df, os.path.join(results_dir, "cardio_feature_importance.csv"))
+
 def main():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    default_results_dir = os.path.join(base_dir, "rf_feature_importance_results")
+    
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, default="all", choices=["isolet", "mnist", "har", "emg", "all"])
+    parser.add_argument("--dataset", type=str, default="all", choices=["isolet", "mnist", "har", "emg", "cardio", "all"])
     parser.add_argument("--data_root", type=str, default="./data")
-    parser.add_argument("--results_dir", type=str, default="./rf_feature_importance_results")
+    parser.add_argument("--results_dir", type=str, default=default_results_dir)
     parser.add_argument("--n_estimators", type=int, default=400)
     args = parser.parse_args()
     if args.dataset in ["isolet", "all"]:
@@ -129,6 +147,8 @@ def main():
         run_har(args.data_root, args.results_dir, args.n_estimators)
     if args.dataset in ["emg", "all"]:
         run_emg(args.data_root, args.results_dir, args.n_estimators)
+    if args.dataset in ["cardio", "all"]:
+        run_cardio(args.data_root, args.results_dir, args.n_estimators)
 
 if __name__ == "__main__":
     main()

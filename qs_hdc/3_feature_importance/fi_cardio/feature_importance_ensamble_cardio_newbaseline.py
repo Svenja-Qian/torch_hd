@@ -4,16 +4,18 @@ import csv
 import json
 import random
 from typing import List, Tuple
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torchhd
+import torchvision
 from torch import Tensor
-from torchhd.datasets import EMGHandGestures
-import sys
-from pathlib import Path
+from torchhd.datasets.cardiotocography_3clases import Cardiotocography3Clases
+
 
 current_dir = Path(__file__).resolve().parent
 parent_dir = current_dir.parent
@@ -23,8 +25,8 @@ if str(parent_dir) not in sys.path:
 import index
 
 
-INPUT_FEATURES = 1024
-NUM_CLASSES = 5
+INPUT_FEATURES = 21
+NUM_CLASSES = 3
 
 
 class Classifier(nn.Module):
@@ -53,6 +55,7 @@ class Classifier(nn.Module):
         x = x.view(x.size(0), -1)
         if self.feature_indices is not None:
             x = x[:, self.feature_indices]
+        # Assuming data is normalized to [0, 1], shifting by 0.5 centers it around 0
         x = x - 0.5
         sample_hv = self.projection(x)
         return torchhd.BSCTensor(sample_hv > 0)
@@ -86,8 +89,8 @@ class Classifier(nn.Module):
 
 
 def split_train_val(
-    dataset, val_ratio: float, seed: int
-) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
+    dataset: torch.utils.data.Dataset, val_ratio: float, seed: int
+) -> Tuple[torch.utils.data.Subset, torch.utils.data.Subset]:
     n = len(dataset)
     indices = list(range(n))
     rng = random.Random(seed)
@@ -98,6 +101,38 @@ def split_train_val(
     train_subset = torch.utils.data.Subset(dataset, train_idx)
     val_subset = torch.utils.data.Subset(dataset, val_idx)
     return train_subset, val_subset
+
+
+def compute_feature_importance(dataset) -> np.ndarray:
+    """
+    Computes feature importance using ANOVA F-value (f_classif).
+    Returns indices of features sorted by importance (descending).
+    """
+    # Extract data and targets from dataset
+    # Assuming dataset.data and dataset.targets are available and are tensors
+    if hasattr(dataset, 'data') and hasattr(dataset, 'targets'):
+        X = dataset.data.numpy()
+        y = dataset.targets.numpy()
+    else:
+        # Fallback for subsets or other structures if necessary
+        # For Cardiotocography3Clases (DatasetFourFold), .data and .targets should exist on the main dataset object
+        # But if 'dataset' passed here is a Subset, we need to handle it.
+        # Here we expect the full training dataset.
+        raise ValueError("Dataset must have .data and .targets attributes for feature importance computation")
+
+    # Handle NaN or Inf if any (MinMax scaling should have handled this, but just in case)
+    X = np.nan_to_num(X)
+    
+    # Compute F-value
+    f_scores, _ = f_classif(X, y)
+    
+    # Handle NaNs in f_scores (e.g. constant features)
+    f_scores = np.nan_to_num(f_scores, nan=0.0)
+    
+    # Sort indices by score descending
+    sorted_indices = np.argsort(f_scores)[::-1]
+    
+    return sorted_indices.astype(np.int64)
 
 
 def load_feature_importance_indices(
@@ -113,7 +148,7 @@ def load_feature_importance_indices(
     df_sorted = df.sort_values(by=["rank_perm", "rank_avg"], ascending=[True, True])
     feature_indices = []
     for name in df_sorted["feature"].tolist():
-        if isinstance(name, str) and name.startswith("emg_"):
+        if isinstance(name, str) and name.startswith("cardio_"):
             idx = int(name.split("_")[1])
         else:
             idx = int(name)
@@ -159,7 +194,7 @@ def parse_sorted_feature_indices(csv_path: str, n_features: int) -> np.ndarray:
     df_sorted = df.sort_values(by=["rank_perm", "rank_avg"], ascending=[True, True])
     feature_indices = []
     for name in df_sorted["feature"].tolist():
-        if isinstance(name, str) and name.startswith("emg_"):
+        if isinstance(name, str) and name.startswith("cardio_"):
             idx = int(name.split("_")[1])
         else:
             idx = int(name)
@@ -303,17 +338,34 @@ def run_experiment(
     results_dir = os.path.join(base_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
 
+    # Use 'data' directory in the same folder as this script, or the shared one?
+    # Original used "data" in base_dir.
+    # Cardio dataset is usually shared.
+    # Cardiotocography3Clases handles download to root.
+    # We will use "../../../data" relative to this script to put it in the project root data folder
+    # or just "data" locally. Let's use a local "data" folder for consistency with MNIST script.
     data_dir = os.path.join(base_dir, "data")
-
-    def transform(x):
-        return x.flatten()
-
-    train_ds = EMGHandGestures(
-        data_dir, subjects=[0, 1, 2, 3], download=True, transform=transform
-    )
-    test_ds = EMGHandGestures(
-        data_dir, subjects=[4], download=True, transform=transform
-    )
+    
+    # Load Dataset (Fold 0 by default)
+    train_ds = Cardiotocography3Clases(data_dir, train=True, fold=0, download=True)
+    test_ds = Cardiotocography3Clases(data_dir, train=False, fold=0, download=True)
+    
+    # Normalize Data (Min-Max to [0, 1])
+    # Assuming .data is a float tensor
+    X_train = train_ds.data.float()
+    X_test = test_ds.data.float()
+    
+    min_val = X_train.min(dim=0, keepdim=True)[0]
+    max_val = X_train.max(dim=0, keepdim=True)[0]
+    range_val = max_val - min_val
+    range_val[range_val == 0] = 1.0  # Avoid division by zero
+    
+    train_ds.data = (X_train - min_val) / range_val
+    test_ds.data = (X_test - min_val) / range_val
+    
+    # Update global INPUT_FEATURES dynamically
+    global INPUT_FEATURES
+    INPUT_FEATURES = train_ds.data.shape[1]
 
     if E <= 0:
         E = 1
@@ -323,6 +375,7 @@ def run_experiment(
     for i in range(residue):
         dims[i] += 1
 
+    # Compute Feature Importance using the training dataset
     partitions = load_feature_importance_indices(
         csv_path=importance_csv_path,
         n_features=INPUT_FEATURES,
@@ -335,9 +388,7 @@ def run_experiment(
     )
 
     baseline_k_global = len(partitions[0])
-    hw_bits = index.compute_hardware_bits(
-        dims, partitions, E, NUM_CLASSES, D_total, baseline_k_global
-    )
+    hw_bits = index.compute_hardware_bits(dims, partitions, E, NUM_CLASSES, D_total, baseline_k_global)
     runs_metrics: List[dict] = []
     seeds_list: List[List[int]] = []
 
@@ -374,6 +425,7 @@ def run_experiment(
             feature_indices=torch.from_numpy(baseline_idx).long().to(device),
         )
         baseline.fit(train_ld)
+        # base_acc = evaluate_accuracy(baseline, test_ld) # unused in print, but calculated in metrics
 
         if weighting == "boosting":
             train_eval_ld = torch.utils.data.DataLoader(
@@ -439,13 +491,9 @@ def run_experiment(
         hw_bits=hw_bits,
         num_runs=num_runs,
     )
-    print(
-        f"Baseline mean accuracy: {agg['acc_baseline_mean']:.4f}, std: {agg['acc_baseline_std']:.4f}"
-    )
-    print(
-        f"Ensemble mean accuracy: {agg['acc_ensemble_mean']:.4f}, std: {agg['acc_ensemble_std']:.4f}"
-    )
-    for i, acc in enumerate(agg["expert_accs_mean"]):
+    print(f"Baseline mean accuracy: {agg['acc_baseline_mean']:.4f}, std: {agg['acc_baseline_std']:.4f}")
+    print(f"Ensemble mean accuracy: {agg['acc_ensemble_mean']:.4f}, std: {agg['acc_ensemble_std']:.4f}")
+    for i, acc in enumerate(agg['expert_accs_mean']):
         print(f"Expert {i} mean accuracy: {acc:.4f}")
     print(f"Saved summary to: {results_csv_path}")
 
@@ -476,17 +524,15 @@ def main():
         device = torch.device(args.device)
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(base_dir)
-    importance_csv_path = os.path.normpath(
-        os.path.join(parent_dir, "rf_feature_importance_results/emg_feature_importance.csv")
-    )
-
+    # Hardcoded path as requested by user
+    importance_csv_path = "/Users/qianshen/torch_hd/torch_hd/qs_hdc/3_feature_importance/rf_feature_importance_results/cardio_feature_importance.csv"
+    
     results_dir = os.path.join(base_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
     effective_num_runs = args.runs if args.runs is not None else args.num_runs
     results_path = os.path.join(
         results_dir,
-        f"emg_fi_D{args.D_total}_E{args.E}_{args.weighting}_rr{int(args.per_expert_ratio * 100)}_run{args.run_time}.csv",
+        f"cardio_fi_D{args.D_total}_E{args.E}_{args.weighting}_rr{int(args.per_expert_ratio * 100)}_run{args.run_time}.csv",
     )
     run_experiment(
         D_total=args.D_total,

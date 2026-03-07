@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torchhd
 from torch import Tensor
-from torchhd.datasets import EMGHandGestures
+from torchhd.datasets import UCIHAR
 import sys
 from pathlib import Path
 
@@ -23,8 +23,8 @@ if str(parent_dir) not in sys.path:
 import index
 
 
-INPUT_FEATURES = 1024
-NUM_CLASSES = 5
+INPUT_FEATURES = 561
+NUM_CLASSES = 6
 
 
 class Classifier(nn.Module):
@@ -35,11 +35,15 @@ class Classifier(nn.Module):
         in_features: int,
         device: torch.device,
         feature_indices: torch.Tensor = None,
+        epochs: int = 0,
+        lr: float = 1.0,
     ):
         super().__init__()
         self.device = device
         self.num_classes = num_classes
         self.dimensions = dimensions
+        self.epochs = epochs
+        self.lr = lr
         self.projection = torchhd.embeddings.Projection(in_features, dimensions)
         with torch.no_grad():
             self.projection.weight.data = self.projection.weight.data.sign()
@@ -59,22 +63,69 @@ class Classifier(nn.Module):
 
     def fit(self, data_loader) -> "Classifier":
         self.train()
-        class_accumulators = torch.zeros(
-            self.num_classes,
-            self.dimensions,
-            dtype=torch.int32,
-            device=self.device,
-        )
+        
+        # 1. Pre-compute encoded samples (one pass)
+        encoded_list = []
+        labels_list = []
         with torch.no_grad():
             for samples, labels in data_loader:
                 samples = samples.to(self.device).float()
-                labels = labels.to(self.device)
-                bipolar = torch.where(
-                    self.encode(samples),
-                    torch.tensor(1, device=self.device, dtype=torch.int32),
-                    torch.tensor(-1, device=self.device, dtype=torch.int32),
-                )
-                class_accumulators.index_add_(0, labels, bipolar)
+                encoded_list.append(self.encode(samples))
+                labels_list.append(labels.to(self.device))
+        
+        encoded_samples = torch.cat(encoded_list, dim=0)  # BSCTensor
+        all_labels = torch.cat(labels_list, dim=0)
+        
+        # 2. Initialize Accumulators
+        class_accumulators = torch.zeros(
+            self.num_classes,
+            self.dimensions,
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+        # Convert to bipolar float for accumulation
+        # Use torch.where directly on BSCTensor
+        bipolar_all = torch.where(
+            encoded_samples,
+            torch.tensor(1.0, device=self.device, dtype=torch.float32),
+            torch.tensor(-1.0, device=self.device, dtype=torch.float32),
+        )
+        
+        # Initial one-shot learning
+        class_accumulators.index_add_(0, all_labels, bipolar_all)
+        
+        # 3. Retraining Loop (Vectorized)
+        current_lr = self.lr
+        
+        for epoch in range(self.epochs):
+            # Centroids from current accumulators
+            centroids = torchhd.BSCTensor(class_accumulators > 0)
+            
+            # Predict all samples at once
+            sims = torchhd.hamming_similarity(encoded_samples, centroids)
+            preds = torch.argmax(sims, dim=-1)
+            
+            # Identify mistakes
+            mask = preds != all_labels
+            if not mask.any():
+                break
+            
+            # Vectorized update
+            # Add to correct class, subtract from predicted class
+            # Only for misclassified samples
+            bipolar_wrong = bipolar_all[mask]
+            update_vec = bipolar_wrong * current_lr
+            
+            class_accumulators.index_add_(0, all_labels[mask], update_vec)
+            class_accumulators.index_add_(0, preds[mask], -update_vec)
+            
+            # Simple LR decay
+            current_lr = self.lr / (1.0 + 0.1 * (epoch + 1))
+            
+            # Optional: Normalize to prevent overflow (though float32 is large)
+            # class_accumulators.clamp_(-1e6, 1e6) 
+
         self.centroids = torchhd.BSCTensor(class_accumulators > 0)
         return self
 
@@ -86,7 +137,7 @@ class Classifier(nn.Module):
 
 
 def split_train_val(
-    dataset, val_ratio: float, seed: int
+    dataset: UCIHAR, val_ratio: float, seed: int
 ) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
     n = len(dataset)
     indices = list(range(n))
@@ -113,7 +164,7 @@ def load_feature_importance_indices(
     df_sorted = df.sort_values(by=["rank_perm", "rank_avg"], ascending=[True, True])
     feature_indices = []
     for name in df_sorted["feature"].tolist():
-        if isinstance(name, str) and name.startswith("emg_"):
+        if isinstance(name, str) and name.startswith("har_"):
             idx = int(name.split("_")[1])
         else:
             idx = int(name)
@@ -159,7 +210,7 @@ def parse_sorted_feature_indices(csv_path: str, n_features: int) -> np.ndarray:
     df_sorted = df.sort_values(by=["rank_perm", "rank_avg"], ascending=[True, True])
     feature_indices = []
     for name in df_sorted["feature"].tolist():
-        if isinstance(name, str) and name.startswith("emg_"):
+        if isinstance(name, str) and name.startswith("har_"):
             idx = int(name.split("_")[1])
         else:
             idx = int(name)
@@ -178,6 +229,7 @@ def train_expert(
     seed: int,
     train_loader,
     device: torch.device,
+    epochs: int = 0,
 ) -> Classifier:
     torch.manual_seed(seed)
     feature_indices = torch.from_numpy(idx_e).long().to(device)
@@ -187,6 +239,7 @@ def train_expert(
         in_features=len(idx_e),
         device=device,
         feature_indices=feature_indices,
+        epochs=epochs,
     )
     model.fit(train_loader)
     return model
@@ -225,6 +278,7 @@ def train_experts_boosting(
     train_eval_loader,
     device: torch.device,
     expert_seeds: List[int],
+    epochs: int = 0,
 ) -> Tuple[List[Classifier], List[float]]:
     n_train = len(train_subset)
     sample_weights = np.ones(n_train, dtype=np.float64) / n_train
@@ -246,6 +300,7 @@ def train_experts_boosting(
             seed=expert_seeds[e],
             train_loader=train_loader_weighted,
             device=device,
+            epochs=epochs,
         )
 
         preds = []
@@ -298,22 +353,15 @@ def run_experiment(
     importance_csv_path: str,
     common_ratio: float,
     per_expert_ratio: float,
+    epochs: int = 0,
 ):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     results_dir = os.path.join(base_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
 
     data_dir = os.path.join(base_dir, "data")
-
-    def transform(x):
-        return x.flatten()
-
-    train_ds = EMGHandGestures(
-        data_dir, subjects=[0, 1, 2, 3], download=True, transform=transform
-    )
-    test_ds = EMGHandGestures(
-        data_dir, subjects=[4], download=True, transform=transform
-    )
+    train_ds = UCIHAR(data_dir, train=True, download=True)
+    test_ds = UCIHAR(data_dir, train=False, download=True)
 
     if E <= 0:
         E = 1
@@ -335,9 +383,7 @@ def run_experiment(
     )
 
     baseline_k_global = len(partitions[0])
-    hw_bits = index.compute_hardware_bits(
-        dims, partitions, E, NUM_CLASSES, D_total, baseline_k_global
-    )
+    hw_bits = index.compute_hardware_bits(dims, partitions, E, NUM_CLASSES, D_total, baseline_k_global)
     runs_metrics: List[dict] = []
     seeds_list: List[List[int]] = []
 
@@ -372,8 +418,10 @@ def run_experiment(
             baseline_k,
             device=device,
             feature_indices=torch.from_numpy(baseline_idx).long().to(device),
+            epochs=epochs,
         )
         baseline.fit(train_ld)
+        base_acc = evaluate_accuracy(baseline, test_ld)
 
         if weighting == "boosting":
             train_eval_ld = torch.utils.data.DataLoader(
@@ -387,6 +435,7 @@ def run_experiment(
                 train_eval_loader=train_eval_ld,
                 device=device,
                 expert_seeds=expert_seeds,
+                epochs=epochs,
             )
             w = torch.tensor(alphas, device=device, dtype=torch.float32)
         else:
@@ -398,6 +447,7 @@ def run_experiment(
                     seed=expert_seeds[e],
                     train_loader=train_ld,
                     device=device,
+                    epochs=epochs,
                 )
                 experts.append(model_e)
 
@@ -439,13 +489,9 @@ def run_experiment(
         hw_bits=hw_bits,
         num_runs=num_runs,
     )
-    print(
-        f"Baseline mean accuracy: {agg['acc_baseline_mean']:.4f}, std: {agg['acc_baseline_std']:.4f}"
-    )
-    print(
-        f"Ensemble mean accuracy: {agg['acc_ensemble_mean']:.4f}, std: {agg['acc_ensemble_std']:.4f}"
-    )
-    for i, acc in enumerate(agg["expert_accs_mean"]):
+    print(f"Baseline mean accuracy: {agg['acc_baseline_mean']:.4f}, std: {agg['acc_baseline_std']:.4f}")
+    print(f"Ensemble mean accuracy: {agg['acc_ensemble_mean']:.4f}, std: {agg['acc_ensemble_std']:.4f}")
+    for i, acc in enumerate(agg['expert_accs_mean']):
         print(f"Expert {i} mean accuracy: {acc:.4f}")
     print(f"Saved summary to: {results_csv_path}")
 
@@ -465,6 +511,7 @@ def main():
     parser.add_argument("--common_ratio", type=float, default=0.10)
     parser.add_argument("--per_expert_ratio", type=float, default=0.30)
     parser.add_argument("--baseline_k_mode", type=str, default="first", choices=["first", "avg"])
+    parser.add_argument("--epochs", type=int, default=0)
     args = parser.parse_args()
 
     if args.E != 3:
@@ -478,7 +525,7 @@ def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(base_dir)
     importance_csv_path = os.path.normpath(
-        os.path.join(parent_dir, "rf_feature_importance_results/emg_feature_importance.csv")
+        os.path.join(parent_dir, "rf_feature_importance_results/har_feature_importance.csv")
     )
 
     results_dir = os.path.join(base_dir, "results")
@@ -486,7 +533,7 @@ def main():
     effective_num_runs = args.runs if args.runs is not None else args.num_runs
     results_path = os.path.join(
         results_dir,
-        f"emg_fi_D{args.D_total}_E{args.E}_{args.weighting}_rr{int(args.per_expert_ratio * 100)}_run{args.run_time}.csv",
+        f"har_fi_D{args.D_total}_E{args.E}_{args.weighting}_rr{int(args.per_expert_ratio * 100)}_run{args.run_time}.csv",
     )
     run_experiment(
         D_total=args.D_total,
@@ -500,6 +547,7 @@ def main():
         importance_csv_path=importance_csv_path,
         common_ratio=args.common_ratio,
         per_expert_ratio=args.per_expert_ratio,
+        epochs=args.epochs,
     )
 
 
