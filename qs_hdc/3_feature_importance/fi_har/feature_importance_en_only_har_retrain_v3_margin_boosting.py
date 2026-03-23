@@ -1,18 +1,14 @@
 import argparse
 import os
-import csv
-import json
 import random
 from typing import List, Tuple
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import torchhd
-import torchvision
 from torch import Tensor
-from torchvision.datasets import MNIST
+from torchhd.datasets import UCIHAR
 import sys
 from pathlib import Path
 
@@ -24,8 +20,8 @@ if str(parent_dir) not in sys.path:
 import index
 
 
-INPUT_FEATURES = 28 * 28
-NUM_CLASSES = 10
+INPUT_FEATURES = 561
+NUM_CLASSES = 6
 
 
 class Classifier(nn.Module):
@@ -60,14 +56,11 @@ class Classifier(nn.Module):
         x = x.view(x.size(0), -1)
         if self.feature_indices is not None:
             x = x[:, self.feature_indices]
-        x = x - 0.5 
         sample_hv = self.projection(x)
         return torchhd.BSCTensor(sample_hv > 0)
 
     def fit(self, data_loader, sample_weights: torch.Tensor = None) -> "Classifier":
         self.train()
-        
-        # 1. Pre-compute encoded samples (one pass)
         encoded_list = []
         labels_list = []
         with torch.no_grad():
@@ -75,221 +68,54 @@ class Classifier(nn.Module):
                 samples = samples.to(self.device).float()
                 encoded_list.append(self.encode(samples))
                 labels_list.append(labels.to(self.device))
-        
         total_samples = sum(t.size(0) for t in labels_list)
-        
-        # Initialize class accumulators
         class_accumulators = torch.zeros((self.num_classes, self.dimensions), device=self.device)
-
-        # Shuffle data for better training (especially if loader is not shuffled)
-        # We need to shuffle encoded_list, labels_list, and sample_weights synchronously
-        # It's easier to concat first, then shuffle, unless OOM is strict.
-        # For strict OOM, we would shuffle indices.
-        
-        # Threshold set to 10000 as requested
-        if total_samples > 10000:
-            # --- Batch Mode (Iterative Update) ---
-            # print("Using Batch Mode (OOM Protection)")
-            # We can't concat all. But we can shuffle the order of batches? 
-            # Or shuffle indices and pick from list? 
-            # List access is slow.
-            # Simple approach: Shuffle the list of batches? No, batches are small (1).
-            # If batch_size=1, shuffling the list is equivalent to shuffling samples.
-            
-            combined = list(zip(encoded_list, labels_list))
-            
-            # If we have weights, we need to attach them before shuffling
-            if sample_weights is not None:
-                # sample_weights is a Tensor. Split it into list.
-                # Assuming data_loader was sequential, sample_weights corresponds 1-to-1
-                weights_list = sample_weights.split(1) # Assuming batch_size=1
-                if len(weights_list) == len(combined):
-                     combined_w = list(zip(encoded_list, labels_list, weights_list))
-                     random.shuffle(combined_w)
-                     encoded_list, labels_list, weights_list = zip(*combined_w)
-                     sample_weights_shuffled = torch.cat(weights_list)
-                else:
-                    # Mismatch size (e.g. loader batch_size != 1 or other issue)
-                    # Fallback: don't shuffle or warn.
-                    # For now, assume batch_size=1 as in our script.
-                    random.shuffle(combined)
-                    encoded_list, labels_list = zip(*combined)
-                    sample_weights_shuffled = sample_weights # Mismatch risk!
-            else:
-                random.shuffle(combined)
-                encoded_list, labels_list = zip(*combined)
-                sample_weights_shuffled = None
-
-            # Initial Training (Batch)
-            start_idx = 0
-            for i, (encoded_batch, labels_batch) in enumerate(zip(encoded_list, labels_list)):
-                batch_size = labels_batch.size(0)
-                bipolar_batch = torch.where(
-                    encoded_batch,
-                    torch.tensor(1.0, device=self.device, dtype=torch.float32),
-                    torch.tensor(-1.0, device=self.device, dtype=torch.float32),
-                )
-                
-                # Apply sample weights if provided
-                if sample_weights_shuffled is not None:
-                    batch_weights = sample_weights_shuffled[start_idx : start_idx + batch_size].to(self.device)
-                    bipolar_batch = bipolar_batch * batch_weights.unsqueeze(1)
-                
-                class_accumulators.index_add_(0, labels_batch, bipolar_batch)
-                start_idx += batch_size
-
-            # Retraining Loop (Batch)
-            current_lr = self.lr
-            prev_mistakes = total_samples + 1
-            no_improve_epochs = 0
-            
-            for epoch in range(self.epochs):
-                mistake_count = 0
-                # Update centroids for the epoch
-                centroids = torchhd.BSCTensor(class_accumulators >= 0)
-                
-                start_idx = 0
-                for i, (encoded_batch, labels_batch) in enumerate(zip(encoded_list, labels_list)):
-                    batch_size = labels_batch.size(0)
-                    sims = torchhd.hamming_similarity(encoded_batch, centroids)
-                    preds = torch.argmax(sims, dim=-1)
-                    
-                    # Margin Logic
-                    sim_correct = sims.gather(1, labels_batch.view(-1, 1)).squeeze()
-                    sims_clone = sims.clone()
-                    min_val = torch.iinfo(sims.dtype).min if sims.dtype in [torch.int32, torch.int64] else -float('inf')
-                    sims_clone.scatter_(1, labels_batch.view(-1, 1), min_val)
-                    sim_wrong_max, wrong_max_idx = sims_clone.max(dim=1)
-
-                    # Normalize for margin check
-                    sim_correct_norm = sim_correct.float() / self.dimensions
-                    sim_wrong_max_norm = sim_wrong_max.float() / self.dimensions
-
-                    mask_wrong = preds != labels_batch
-                    mask_margin = (sim_correct_norm - sim_wrong_max_norm < self.margin) & (preds == labels_batch)
-                    mask_update = mask_wrong | mask_margin
-                    
-                    mistake_count += mask_wrong.sum().item()
-                    
-                    if mask_update.any():
-                        push_target = torch.where(mask_wrong, preds, wrong_max_idx)
-                        
-                        bipolar_wrong = torch.where(
-                            encoded_batch[mask_update],
-                            torch.tensor(1.0, device=self.device, dtype=torch.float32),
-                            torch.tensor(-1.0, device=self.device, dtype=torch.float32),
-                        )
-                        update_vec = bipolar_wrong * current_lr
-                        
-                        if sample_weights_shuffled is not None:
-                            batch_weights = sample_weights_shuffled[start_idx : start_idx + batch_size].to(self.device)
-                            update_vec = update_vec * batch_weights[mask_update].unsqueeze(1)
-                        
-                        class_accumulators.index_add_(0, labels_batch[mask_update], update_vec)
-                        class_accumulators.index_add_(0, push_target[mask_update], -update_vec)
-                    
-                    start_idx += batch_size
-            
-            # Early Stopping Check
-                if mistake_count == 0:
-                    break
-                # if mistake_count < 0.001 * total_samples:
-                #     break
-                # if mistake_count >= prev_mistakes:
-                #     no_improve_epochs += 1
-                # else:
-                #     no_improve_epochs = 0
-                # prev_mistakes = mistake_count
-                # if no_improve_epochs >= 2:
-                #     break
-            
-                current_lr = self.lr / (1.0 + 0.1 * (epoch + 1))
-
+        encoded_samples = torch.cat(encoded_list, dim=0)
+        all_labels = torch.cat(labels_list, dim=0)
+        perm = torch.randperm(total_samples)
+        encoded_samples = encoded_samples[perm]
+        all_labels = all_labels[perm]
+        if sample_weights is not None:
+            weights_all = sample_weights.to(self.device)[perm]
         else:
-            # --- Full Mode (Vectorized) ---
-            encoded_samples = torch.cat(encoded_list, dim=0)
-            all_labels = torch.cat(labels_list, dim=0)
-            
-            # Shuffle in Full Mode
-            perm = torch.randperm(total_samples)
-            encoded_samples = encoded_samples[perm]
-            all_labels = all_labels[perm]
-            if sample_weights is not None:
-                weights_all = sample_weights.to(self.device)[perm]
-            else:
-                weights_all = None
-
-            # Polarization Consistency
-            bipolar_all = torch.where(
-                encoded_samples,
-                torch.tensor(1.0, device=self.device, dtype=torch.float32),
-                torch.tensor(-1.0, device=self.device, dtype=torch.float32),
-            )
-            
-            # Initial one-shot learning
-            if weights_all is not None:
-                bipolar_weighted = bipolar_all * weights_all.unsqueeze(1)
-                class_accumulators.index_add_(0, all_labels, bipolar_weighted)
-            else:
-                class_accumulators.index_add_(0, all_labels, bipolar_all)
-            
-            # Retraining Loop
-            current_lr = self.lr
-            prev_mistakes = total_samples + 1
-            no_improve_epochs = 0
-            
-            for epoch in range(self.epochs):
-                centroids = torchhd.BSCTensor(class_accumulators >= 0)
-                
-                sims = torchhd.hamming_similarity(encoded_samples, centroids)
-                preds = torch.argmax(sims, dim=-1)
-                
-                # Margin Logic
-                sim_correct = sims.gather(1, all_labels.view(-1, 1)).squeeze()
-                sims_clone = sims.clone()
-                min_val = torch.iinfo(sims.dtype).min if sims.dtype in [torch.int32, torch.int64] else -float('inf')
-                sims_clone.scatter_(1, all_labels.view(-1, 1), min_val)
-                sim_wrong_max, wrong_max_idx = sims_clone.max(dim=1)
-
-                # Normalize for margin check
-                sim_correct_norm = sim_correct.float() / self.dimensions
-                sim_wrong_max_norm = sim_wrong_max.float() / self.dimensions
-
-                mask_wrong = preds != all_labels
-                mask_margin = (sim_correct_norm - sim_wrong_max_norm < self.margin) & (preds == all_labels)
-                mask_update = mask_wrong | mask_margin
-
-                mistake_count = mask_wrong.sum().item()
-                
-                # Early Stopping
-                # if mistake_count == 0:
-                #    break
-                if mistake_count < 0.001 * total_samples:
-                    break
-                # if mistake_count >= prev_mistakes:
-                #     no_improve_epochs += 1
-                # else:
-                #     no_improve_epochs = 0
-                # prev_mistakes = mistake_count
-                # if no_improve_epochs >= 2:
-                #     break
-                
-                # Vectorized update
-                if mask_update.any():
-                    push_target = torch.where(mask_wrong, preds, wrong_max_idx)
-
-                    bipolar_wrong = bipolar_all[mask_update]
-                    update_vec = bipolar_wrong * current_lr
-                    
-                    if weights_all is not None:
-                        weights_wrong = weights_all[mask_update]
-                        update_vec = update_vec * weights_wrong.unsqueeze(1)
-                    
-                    class_accumulators.index_add_(0, all_labels[mask_update], update_vec)
-                    class_accumulators.index_add_(0, push_target[mask_update], -update_vec)
-                
-                current_lr = self.lr / (1.0 + 0.1 * (epoch + 1))
-
+            weights_all = None
+        bipolar_all = torch.where(
+            encoded_samples,
+            torch.tensor(1.0, device=self.device, dtype=torch.float32),
+            torch.tensor(-1.0, device=self.device, dtype=torch.float32),
+        )
+        if weights_all is not None:
+            bipolar_weighted = bipolar_all * weights_all.unsqueeze(1)
+            class_accumulators.index_add_(0, all_labels, bipolar_weighted)
+        else:
+            class_accumulators.index_add_(0, all_labels, bipolar_all)
+        current_lr = self.lr
+        for epoch in range(self.epochs):
+            centroids = torchhd.BSCTensor(class_accumulators >= 0)
+            sims = torchhd.hamming_similarity(encoded_samples, centroids)
+            preds = torch.argmax(sims, dim=-1)
+            sim_correct = sims.gather(1, all_labels.view(-1, 1)).squeeze()
+            sims_clone = sims.clone()
+            min_val = torch.iinfo(sims.dtype).min if sims.dtype in [torch.int32, torch.int64] else -float('inf')
+            sims_clone.scatter_(1, all_labels.view(-1, 1), min_val)
+            sim_wrong_max, wrong_max_idx = sims_clone.max(dim=1)
+            sim_correct_norm = sim_correct.float() / self.dimensions
+            sim_wrong_max_norm = sim_wrong_max.float() / self.dimensions
+            mask_wrong = preds != all_labels
+            mask_margin = (sim_correct_norm - sim_wrong_max_norm < self.margin) & (preds == all_labels)
+            mask_update = mask_wrong | mask_margin
+            mistake_count = mask_wrong.sum().item()
+            if mistake_count < 0.001 * total_samples:
+                break
+            if mask_update.any():
+                push_target = torch.where(mask_wrong, preds, wrong_max_idx)
+                bipolar_wrong = bipolar_all[mask_update]
+                update_vec = bipolar_wrong * current_lr
+                if weights_all is not None:
+                    update_vec = update_vec * weights_all[mask_update].unsqueeze(1)
+                class_accumulators.index_add_(0, all_labels[mask_update], update_vec)
+                class_accumulators.index_add_(0, push_target[mask_update], -update_vec)
+            current_lr = self.lr / (1.0 + 0.1 * (epoch + 1))
         self.centroids = torchhd.BSCTensor(class_accumulators >= 0)
         return self
 
@@ -301,7 +127,7 @@ class Classifier(nn.Module):
 
 
 def split_train_val(
-    dataset: MNIST, val_ratio: float, seed: int
+    dataset: UCIHAR, val_ratio: float, seed: int
 ) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
     n = len(dataset)
     indices = list(range(n))
@@ -322,14 +148,16 @@ def load_feature_importance_indices(
     per_expert_ratio: float,
     E: int,
 ) -> List[np.ndarray]:
+    import pandas as pd
     df = pd.read_csv(csv_path)
     if "rank_perm" not in df.columns:
         raise RuntimeError("Expected column 'rank_perm' in feature importance CSV.")
     df_sorted = df.sort_values(by=["rank_perm", "rank_avg"], ascending=[True, True])
     feature_indices = []
     for name in df_sorted["feature"].tolist():
-        if isinstance(name, str) and name.startswith("px_"):
-            idx = int(name.split("_")[1])
+        if isinstance(name, str) and "_" in name:
+            tail = name.split("_")[-1]
+            idx = int(tail)
         else:
             idx = int(name)
         feature_indices.append(idx)
@@ -368,14 +196,16 @@ def load_feature_importance_indices(
 
 
 def parse_sorted_feature_indices(csv_path: str, n_features: int) -> np.ndarray:
+    import pandas as pd
     df = pd.read_csv(csv_path)
     if "rank_perm" not in df.columns:
         raise RuntimeError("Expected column 'rank_perm' in feature importance CSV.")
     df_sorted = df.sort_values(by=["rank_perm", "rank_avg"], ascending=[True, True])
     feature_indices = []
     for name in df_sorted["feature"].tolist():
-        if isinstance(name, str) and name.startswith("px_"):
-            idx = int(name.split("_")[1])
+        if isinstance(name, str) and "_" in name:
+            tail = name.split("_")[-1]
+            idx = int(tail)
         else:
             idx = int(name)
         feature_indices.append(idx)
@@ -452,16 +282,14 @@ def train_experts_boosting(
     sample_weights = np.ones(n_train, dtype=np.float64) / n_train
     experts: List[Classifier] = []
     alphas: List[float] = []
-
     for e in range(E):
         weights_tensor = torch.from_numpy(sample_weights).float()
         sampler = torch.utils.data.WeightedRandomSampler(
             weights_tensor, num_samples=n_train, replacement=True
         )
         train_loader_weighted = torch.utils.data.DataLoader(
-            train_subset, batch_size=256, sampler=sampler
+            train_subset, batch_size=1, sampler=sampler
         )
-
         expert = train_expert(
             idx_e=partitions[e],
             D_e=dims[e],
@@ -469,10 +297,9 @@ def train_experts_boosting(
             train_loader=train_loader_weighted,
             device=device,
             epochs=epochs,
-            sample_weights=None, # Use resampling instead of reweighting
+            sample_weights=None,
             margin=margin,
         )
-
         preds = []
         labels_all = []
         with torch.no_grad():
@@ -484,31 +311,114 @@ def train_experts_boosting(
                 labels_all.append(labels.cpu().numpy())
         preds = np.concatenate(preds, axis=0)
         labels_all = np.concatenate(labels_all, axis=0)
-
         incorrect = preds != labels_all
         weighted_error = float((sample_weights * incorrect).sum())
-
         if weighted_error <= 0.0:
             alpha = 5.0
         elif weighted_error >= 0.5:
             alpha = 1e-3
         else:
-            alpha = 0.5 * float(
-                np.log((1.0 - weighted_error) / max(weighted_error, 1e-8))
-            )
-
+            alpha = 0.5 * float(np.log((1.0 - weighted_error) / max(weighted_error, 1e-8)))
         sample_weights *= np.exp(alpha * incorrect.astype(np.float64))
         sample_weights /= sample_weights.sum() + 1e-12
-
         experts.append(expert)
         alphas.append(alpha)
-
     return experts, alphas
 
 
 def generate_seeds_for_models(num_models: int, master_seed: int) -> List[int]:
     rnd = random.Random(master_seed)
     return rnd.sample(range(10000), num_models)
+
+
+def _confusion_matrix(labels: np.ndarray, preds: np.ndarray, num_classes: int) -> List[List[int]]:
+    cm = np.zeros((num_classes, num_classes), dtype=np.int64)
+    for t, p in zip(labels, preds):
+        cm[int(t), int(p)] += 1
+    return cm.tolist()
+
+
+def evaluate_ensemble_only(
+    experts: List[Classifier],
+    weights: torch.Tensor,
+    test_loader,
+    device: torch.device,
+    num_classes: int,
+):
+    n_total = 0
+    n_correct = 0
+    labels_all = []
+    ens_preds = []
+    expert_preds_list = [[] for _ in range(len(experts))]
+    ens_margins_correct = []
+    ens_margins_wrong = []
+    with torch.no_grad():
+        for samples, labels in test_loader:
+            samples = samples.to(device).float()
+            labels = labels.to(device)
+            sim_acc = None
+            for i, model in enumerate(experts):
+                sim_i = model(samples) * weights[i]
+                sim_acc = sim_i if sim_acc is None else sim_acc + sim_i
+            pred_ens = torch.argmax(sim_acc, dim=-1)
+            top2e, _ = torch.topk(sim_acc.squeeze(0), k=2, largest=True, sorted=True)
+            margin_e = float(top2e[0].item() - top2e[1].item())
+            n_total += labels.size(0)
+            correct_ens = (pred_ens == labels)
+            n_correct += torch.sum(correct_ens).item()
+            labels_all.append(labels.cpu().numpy())
+            ens_preds.append(pred_ens.cpu().numpy())
+            if bool(correct_ens.all().item()):
+                ens_margins_correct.append(margin_e)
+            else:
+                ens_margins_wrong.append(margin_e)
+            for e in range(len(experts)):
+                pred_e = experts[e].predict(samples)
+                expert_preds_list[e].append(pred_e.cpu().numpy())
+    labels_all = np.concatenate(labels_all, axis=0)
+    ens_preds = np.concatenate(ens_preds, axis=0)
+    cm_ens = _confusion_matrix(labels_all, ens_preds, num_classes)
+    expert_errors = []
+    for e in range(len(experts)):
+        preds_e = np.concatenate(expert_preds_list[e], axis=0)
+        err_e = (preds_e != labels_all).astype(np.float32)
+        expert_errors.append(err_e)
+    expert_errors = np.stack(expert_errors, axis=0) if expert_errors else np.zeros((0, 0), dtype=np.float32)
+    if expert_errors.size > 0:
+        with np.errstate(invalid="ignore"):
+            corr_err = np.corrcoef(expert_errors)
+        corr_err = np.nan_to_num(corr_err, nan=0.0).tolist()
+    else:
+        corr_err = []
+    disagree_rates = []
+    for i in range(len(experts)):
+        for j in range(i + 1, len(experts)):
+            preds_i = np.concatenate(expert_preds_list[i], axis=0)
+            preds_j = np.concatenate(expert_preds_list[j], axis=0)
+            disagree_rates.append(float(np.mean(preds_i != preds_j)))
+    mean_disagree = float(np.mean(disagree_rates)) if disagree_rates else 0.0
+    all_ens_margins = ens_margins_correct + ens_margins_wrong
+    mean_ens_margin = float(np.mean(all_ens_margins)) if all_ens_margins else 0.0
+    mean_ens_margin_correct = float(np.mean(ens_margins_correct)) if ens_margins_correct else 0.0
+    mean_ens_margin_wrong = float(np.mean(ens_margins_wrong)) if ens_margins_wrong else 0.0
+    ens_acc = n_correct / n_total if n_total > 0 else 0.0
+    return {
+        "base_acc": 0.0,
+        "ens_acc": ens_acc,
+        "expert_accs": [],  # optional per-run
+        "cm_ens": np.array(cm_ens).astype(np.int64),
+        "cm_base": np.zeros_like(np.array(cm_ens)).astype(np.int64),
+        "corr_err": np.array(corr_err).astype(np.float64),
+        "mean_ens_margin": mean_ens_margin,
+        "mean_base_margin": 0.0,
+        "mean_disagree": mean_disagree,
+        "mean_ens_margin_correct": mean_ens_margin_correct,
+        "mean_ens_margin_wrong": mean_ens_margin_wrong,
+        "mean_base_margin_correct": 0.0,
+        "mean_base_margin_wrong": 0.0,
+        "gap_ens_margin": mean_ens_margin_correct - mean_ens_margin_wrong,
+        "gap_base_margin": 0.0,
+    }
 
 
 def run_experiment(
@@ -531,8 +441,8 @@ def run_experiment(
     os.makedirs(results_dir, exist_ok=True)
 
     data_dir = os.path.join(base_dir, "data")
-    train_ds = MNIST(data_dir, train=True, download=True, transform=torchvision.transforms.ToTensor())
-    test_ds = MNIST(data_dir, train=False, download=True, transform=torchvision.transforms.ToTensor())
+    train_ds = UCIHAR(data_dir, train=True, download=True)
+    test_ds = UCIHAR(data_dir, train=False, download=True)
 
     if E <= 0:
         E = 1
@@ -549,17 +459,13 @@ def run_experiment(
         per_expert_ratio=per_expert_ratio,
         E=E,
     )
-    sorted_all = parse_sorted_feature_indices(
-        csv_path=importance_csv_path, n_features=INPUT_FEATURES
-    )
-
     baseline_k_global = len(partitions[0])
     hw_bits = index.compute_hardware_bits(dims, partitions, E, NUM_CLASSES, D_total, baseline_k_global)
     runs_metrics: List[dict] = []
     seeds_list: List[List[int]] = []
 
     print(
-        f"Starting {num_runs} runs (D_total={D_total}, E={E}, weighting={weighting}, margin={margin})",
+        f"Starting {num_runs} runs (D_total={D_total}, E={E}, weighting={weighting}, margin={margin}) [ensemble-only]",
         flush=True,
     )
 
@@ -571,33 +477,16 @@ def run_experiment(
             train_ds, val_ratio=val_ratio, seed=seed_base
         )
 
-        train_ld = torch.utils.data.DataLoader(train_subset, batch_size=256, shuffle=True)
-        val_ld = torch.utils.data.DataLoader(val_subset, batch_size=256, shuffle=False)
-        test_ld = torch.utils.data.DataLoader(test_ds, batch_size=256, shuffle=False)
+        train_ld = torch.utils.data.DataLoader(train_subset, batch_size=1, shuffle=True)
+        val_ld = torch.utils.data.DataLoader(val_subset, batch_size=1, shuffle=False)
+        test_ld = torch.utils.data.DataLoader(test_ds, batch_size=1, shuffle=False)
 
-        all_seeds = generate_seeds_for_models(E + 1, seed_base)
-        baseline_seed = all_seeds[0]
-        expert_seeds = all_seeds[1:]
-
-        torch.manual_seed(baseline_seed)
-        np.random.seed(baseline_seed)
-        baseline_k = len(partitions[0])
-        baseline_idx = sorted_all[:baseline_k]
-        baseline = Classifier(
-            NUM_CLASSES,
-            D_total,
-            baseline_k,
-            device=device,
-            feature_indices=torch.from_numpy(baseline_idx).long().to(device),
-            epochs=epochs,
-            margin=margin,
-        )
-        baseline.fit(train_ld)
-        base_acc = evaluate_accuracy(baseline, test_ld)
+        all_seeds = generate_seeds_for_models(E, seed_base)
+        expert_seeds = all_seeds
 
         if weighting == "boosting":
             train_eval_ld = torch.utils.data.DataLoader(
-                train_subset, batch_size=256, shuffle=False
+                train_subset, batch_size=1, shuffle=False
             )
             experts, alphas = train_experts_boosting(
                 E=E,
@@ -624,7 +513,6 @@ def run_experiment(
                     margin=margin,
                 )
                 experts.append(model_e)
-
             if weighting == "val_acc":
                 expert_accs_val: List[float] = []
                 for e in range(E):
@@ -635,13 +523,11 @@ def run_experiment(
             else:
                 w = torch.ones(E, device=device, dtype=torch.float32) / E
 
-        metrics = index.evaluate_run(experts, baseline, w, test_ld, device, NUM_CLASSES)
+        metrics = evaluate_ensemble_only(experts, w, test_ld, device, NUM_CLASSES)
         runs_metrics.append(metrics)
-        seeds_list.append([baseline_seed] + expert_seeds)
+        seeds_list.append(expert_seeds)
         print(
-            f"[Run {r + 1}/{num_runs}] "
-            f"baseline_seed={baseline_seed}, expert_seeds={expert_seeds}, "
-            f"baseline_acc={metrics['base_acc']:.4f}, ensemble_acc={metrics['ens_acc']:.4f}",
+            f"[Run {r + 1}/{num_runs}] ensemble_acc={metrics['ens_acc']:.4f}",
             flush=True,
         )
         index.print_run_metrics(metrics, hw_bits)
@@ -663,7 +549,6 @@ def run_experiment(
         hw_bits=hw_bits,
         num_runs=num_runs,
     )
-    print(f"Baseline mean accuracy: {agg['acc_baseline_mean']:.4f}, std: {agg['acc_baseline_std']:.4f}")
     print(f"Ensemble mean accuracy: {agg['acc_ensemble_mean']:.4f}, std: {agg['acc_ensemble_std']:.4f}")
     for i, acc in enumerate(agg['expert_accs_mean']):
         print(f"Expert {i} mean accuracy: {acc:.4f}")
@@ -700,14 +585,14 @@ def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(base_dir)
     importance_csv_path = os.path.normpath(
-        os.path.join(parent_dir, "rf_feature_importance_results/mnist_feature_importance.csv")
+        os.path.join(parent_dir, "rf_feature_importance_results/har_feature_importance.csv")
     )
 
     results_dir = os.path.join(base_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
     effective_num_runs = args.runs if args.runs is not None else args.num_runs
     
-    filename = f"mnist_fi_D{args.D_total}_E{args.E}_{args.weighting}_rr{int(args.per_expert_ratio * 100)}"
+    filename = f"har_fi_ensemble_only_D{args.D_total}_E{args.E}_{args.weighting}_rr{int(args.per_expert_ratio * 100)}"
     if args.margin > 0:
         filename += f"_margin{args.margin}"
     filename += f"_run{args.run_time}.csv"

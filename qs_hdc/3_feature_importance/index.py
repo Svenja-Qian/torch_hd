@@ -120,11 +120,52 @@ def compute_hardware_bits(dims, partitions, E, num_classes, D_total, baseline_k)
     cent_bits_ens = E * num_classes * int(np.mean(dims))
     proj_bits_base = D_total * baseline_k
     cent_bits_base = num_classes * D_total
+
+    # Hardware-oriented metrics
+    # Memory footprint (bits)
+    # Model storage: Projection matrix (usually fixed/generated on fly for HDC) + Centroids
+    # Here we assume projection matrix is generated on the fly (LFSR), so we only count model weights (Centroids)
+    # However, for FPGA, if we store the projection matrix, it consumes significant BRAM.
+    # Let's provide both: "Model Size" (Centroids only) and "Total Memory" (if Projection stored)
+    
+    # Quantization assumptions: 
+    # - Projection matrix: Binary {-1, 1} -> 1 bit per element (or generated, 0 bits storage)
+    # - Centroids: Integer/Float. Standard HDC uses integers. Let's assume 16-bit integers for accumulation.
+    q_bits = 16 
+    
+    model_size_bits_ens = cent_bits_ens * q_bits
+    model_size_bits_base = cent_bits_base * q_bits
+    
+    # Latency / Operations per query
+    # Operations = Projection Ops + Similarity Ops
+    # Projection Ops: Input_dim * D_dim (XOR/Add)
+    # Similarity Ops: D_dim * Num_Classes (Hamming/Cosine)
+    
+    # For Ensemble: Sum of experts
+    ops_proj_ens = 0
+    ops_sim_ens = 0
+    for i in range(E):
+        d_i = dims[i]
+        k_i = len(partitions[i])
+        ops_proj_ens += k_i * d_i
+        ops_sim_ens += d_i * num_classes
+        
+    ops_proj_base = baseline_k * D_total
+    ops_sim_base = D_total * num_classes
+    
+    total_ops_ens = ops_proj_ens + ops_sim_ens
+    total_ops_base = ops_proj_base + ops_sim_base
+    
     return {
         "proj_bits_ens": int(proj_bits_ens),
         "cent_bits_ens": int(cent_bits_ens),
         "proj_bits_base": int(proj_bits_base),
         "cent_bits_base": int(cent_bits_base),
+        "model_size_bits_ens": int(model_size_bits_ens),
+        "model_size_bits_base": int(model_size_bits_base),
+        "total_ops_ens": int(total_ops_ens),
+        "total_ops_base": int(total_ops_base),
+        "ops_reduction": float(1.0 - total_ops_ens / total_ops_base) if total_ops_base > 0 else 0.0
     }
 
 
@@ -153,6 +194,10 @@ def print_run_metrics(metrics, hw_bits):
     print(
         f"Hardware Cost (bits) -> Ensemble: Projection={hw_bits['proj_bits_ens']}, Centroid={hw_bits['cent_bits_ens']}; "
         f"Baseline: Projection={hw_bits['proj_bits_base']}, Centroid={hw_bits['cent_bits_base']}"
+    )
+    print(
+        f"FPGA/Edge Efficiency -> Ops Reduction: {hw_bits['ops_reduction']*100:.2f}%; "
+        f"Model Size (16-bit): {hw_bits['model_size_bits_ens']/8/1024:.2f} KB (Ens) vs {hw_bits['model_size_bits_base']/8/1024:.2f} KB (Base)"
     )
 
 
@@ -290,6 +335,11 @@ def write_csv_row(
         "cent_bits_ens": hw_bits["cent_bits_ens"],
         "proj_bits_base": hw_bits["proj_bits_base"],
         "cent_bits_base": hw_bits["cent_bits_base"],
+        "model_size_bits_ens": hw_bits["model_size_bits_ens"],
+        "model_size_bits_base": hw_bits["model_size_bits_base"],
+        "total_ops_ens": hw_bits["total_ops_ens"],
+        "total_ops_base": hw_bits["total_ops_base"],
+        "ops_reduction": hw_bits["ops_reduction"],
     }
 
     write_header_main = not os.path.exists(main_path)

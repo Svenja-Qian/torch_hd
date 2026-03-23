@@ -261,10 +261,8 @@ class Classifier(nn.Module):
                 mistake_count = mask_wrong.sum().item()
                 
                 # Early Stopping
-                if mistake_count == 0:
+                if mistake_count < 0.001 * total_samples:
                     break
-                # if mistake_count < 0.001 * total_samples:
-                #     break
                 # if mistake_count >= prev_mistakes:
                 #     no_improve_epochs += 1
                 # else:
