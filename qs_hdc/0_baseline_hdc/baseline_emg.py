@@ -15,11 +15,14 @@ print(f"Using {device} device")
 parser = argparse.ArgumentParser()
 parser.add_argument("--dim", type=int, default=4000)
 parser.add_argument("--batch_size", type=int, default=1)
+parser.add_argument("--runs", type=int, default=10)
+parser.add_argument("--no_center", action="store_true")
 args = parser.parse_args()
 
 DIMENSIONS = args.dim
 INPUT_FEATURES = 1024  # 256 time steps * 4 channels
 BATCH_SIZE = args.batch_size
+RUNS = args.runs
 
 # Load EMGHandGestures using absolute path
 data_dir = os.path.abspath("data")
@@ -35,11 +38,12 @@ test_ds = EMGHandGestures(data_dir, subjects=[4], download=True, transform=trans
 test_ld = torch.utils.data.DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
 
 class Classifier(nn.Module):
-    def __init__(self, num_classes, dimensions, in_features, device=None):
+    def __init__(self, num_classes, dimensions, in_features, device=None, center_inputs=True):
         super().__init__()
         self.device = device if device is not None else torch.device("cpu")
         self.num_classes = num_classes
         self.dimensions = dimensions
+        self.center_inputs = center_inputs
         self.centroids = None
         
         # Binary projection (+1/-1) for hardware efficiency
@@ -50,8 +54,9 @@ class Classifier(nn.Module):
         self.projection.to(self.device)
 
     def encode(self, x):
-        # Center input, project, then binarize (BSCTensor)
-        return torchhd.BSCTensor(self.projection(x - 0.5) > 0)
+        if self.center_inputs:
+            x = x - 0.5
+        return torchhd.BSCTensor(self.projection(x) > 0)
 
     def fit(self, data_loader):
         print("Training model...")
@@ -91,11 +96,17 @@ class Classifier(nn.Module):
         return n_correct / n_total
 
 accuracies = []
-for i in range(10):
+for i in range(RUNS):
     torch.manual_seed(i)
-    print(f"\n--- Run {i+1}/10 (Seed={i}) ---")
+    print(f"\n--- Run {i+1}/{RUNS} (Seed={i}) ---")
     
-    model = Classifier(len(train_ds.classes), DIMENSIONS, INPUT_FEATURES, device=device)
+    model = Classifier(
+        len(train_ds.classes),
+        DIMENSIONS,
+        INPUT_FEATURES,
+        device=device,
+        center_inputs=not args.no_center,
+    )
     model.fit(train_ld)
     
     print("Testing model...")
@@ -106,5 +117,5 @@ for i in range(10):
 avg_acc = statistics.mean(accuracies)
 std_dev = statistics.stdev(accuracies) if len(accuracies) > 1 else 0.0
 
-print(f"\n>>> Average Accuracy over 10 runs: {avg_acc * 100:.3f}%")
+print(f"\n>>> Average Accuracy over {RUNS} runs: {avg_acc * 100:.3f}%")
 print(f">>> Std Dev: {std_dev * 100:.3f}")

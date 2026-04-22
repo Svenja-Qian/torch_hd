@@ -3,90 +3,29 @@ import os
 import csv
 import json
 import random
-import struct
 from typing import List, Tuple
-import gzip
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torchhd
+import torchvision
 from torch import Tensor
+from torchvision.datasets import MNIST
 import sys
 from pathlib import Path
-
-try:
-    import torchvision
-    from torchvision.datasets import MNIST
-except ModuleNotFoundError:
-    torchvision = None
-    MNIST = None
 
 current_dir = Path(__file__).resolve().parent
 parent_dir = current_dir.parent
 if str(parent_dir) not in sys.path:
     sys.path.insert(0, str(parent_dir))
 
+import index
+
 
 INPUT_FEATURES = 28 * 28
 NUM_CLASSES = 10
-MNIST_IMAGE_MAGIC = 2051
-MNIST_LABEL_MAGIC = 2049
-
-
-def _read_idx_images(path: Path) -> torch.Tensor:
-    with path.open("rb") as f:
-        magic, n, rows, cols = struct.unpack(">IIII", f.read(16))
-        if magic != MNIST_IMAGE_MAGIC:
-            raise RuntimeError(f"Unexpected MNIST image magic: {magic}")
-        data = f.read()
-    return torch.frombuffer(data, dtype=torch.uint8).clone().view(n, rows, cols)
-
-
-def _read_idx_labels(path: Path) -> torch.Tensor:
-    with path.open("rb") as f:
-        magic, n = struct.unpack(">II", f.read(8))
-        if magic != MNIST_LABEL_MAGIC:
-            raise RuntimeError(f"Unexpected MNIST label magic: {magic}")
-        data = f.read()
-    return torch.frombuffer(data, dtype=torch.uint8).clone().view(n).to(torch.long)
-
-
-class LocalMNIST(torch.utils.data.Dataset):
-    def __init__(self, root: str, train: bool = True, download: bool = False, transform=None):
-        del download
-        self.transform = transform
-        root_path = Path(root)
-        raw_dir = root_path / "MNIST" / "raw"
-        if train:
-            image_path = raw_dir / "train-images-idx3-ubyte"
-            label_path = raw_dir / "train-labels-idx1-ubyte"
-        else:
-            image_path = raw_dir / "t10k-images-idx3-ubyte"
-            label_path = raw_dir / "t10k-labels-idx1-ubyte"
-
-        if not image_path.exists() or not label_path.exists():
-            raise RuntimeError(
-                "Local MNIST raw files not found. Expected files under "
-                f"{raw_dir}"
-            )
-
-        self.images = _read_idx_images(image_path)
-        self.labels = _read_idx_labels(label_path)
-        self.classes = [str(i) for i in range(NUM_CLASSES)]
-
-    def __len__(self) -> int:
-        return int(self.labels.numel())
-
-    def __getitem__(self, idx: int):
-        image = self.images[idx]
-        label = self.labels[idx]
-        if self.transform is not None:
-            image = self.transform(image.numpy())
-        else:
-            image = image.to(torch.float32).div(255.0).unsqueeze(0)
-        return image, label
 
 
 class Classifier(nn.Module):
@@ -582,17 +521,13 @@ def run_experiment(
     epochs: int = 0,
     margin: float = 0.0,
 ):
-    import index
-
     base_dir = os.path.dirname(os.path.abspath(__file__))
     results_dir = os.path.join(base_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
 
     data_dir = os.path.join(base_dir, "data")
-    mnist_transform = torchvision.transforms.ToTensor() if torchvision is not None else None
-    mnist_cls = MNIST if MNIST is not None else LocalMNIST
-    train_ds = mnist_cls(data_dir, train=True, download=True, transform=mnist_transform)
-    test_ds = mnist_cls(data_dir, train=False, download=True, transform=mnist_transform)
+    train_ds = MNIST(data_dir, train=True, download=True, transform=torchvision.transforms.ToTensor())
+    test_ds = MNIST(data_dir, train=False, download=True, transform=torchvision.transforms.ToTensor())
 
     if E <= 0:
         E = 1

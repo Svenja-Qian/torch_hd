@@ -20,8 +20,6 @@ parent_dir = current_dir.parent
 if str(parent_dir) not in sys.path:
     sys.path.insert(0, str(parent_dir))
 
-import index
-
 
 INPUT_FEATURES = 561
 NUM_CLASSES = 6
@@ -523,6 +521,8 @@ def run_experiment(
     epochs: int = 0,
     margin: float = 0.0,
 ):
+    import index
+
     base_dir = os.path.dirname(os.path.abspath(__file__))
     results_dir = os.path.join(base_dir, "results")
     os.makedirs(results_dir, exist_ok=True)

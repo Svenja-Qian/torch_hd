@@ -1,8 +1,12 @@
 import torch
 import torchhd
 import torch.nn as nn
-import torchvision
-from torchvision.datasets import MNIST
+import gzip
+import os
+import struct
+from pathlib import Path
+
+import requests
 from tqdm import tqdm
 from torch import Tensor
 import statistics
@@ -16,27 +20,120 @@ print(f"Using {device} device")
 parser = argparse.ArgumentParser()
 parser.add_argument("--dim", type=int, default=4000)
 parser.add_argument("--batch_size", type=int, default=1)
+parser.add_argument("--runs", type=int, default=10)
+parser.add_argument("--no_center", action="store_true", help="Disable input centering (x = x - 0.5) before projection.")
+parser.add_argument("--data_root", type=str, default="../data")
 args = parser.parse_args()
 
 DIMENSIONS = args.dim
 IMG_SIZE = 28
 BATCH_SIZE = args.batch_size
+RUNS = args.runs
+DATA_ROOT = args.data_root
 
-# Load MNIST dataset
-transform = torchvision.transforms.ToTensor()
+MNIST_BASE_URL = "https://storage.googleapis.com/cvdf-datasets/mnist/"
+MNIST_FILES = {
+    "train_images": "train-images-idx3-ubyte.gz",
+    "train_labels": "train-labels-idx1-ubyte.gz",
+    "test_images": "t10k-images-idx3-ubyte.gz",
+    "test_labels": "t10k-labels-idx1-ubyte.gz",
+}
 
-train_ds = MNIST("../data", train=True, transform=transform, download=True)
+
+def _download(url: str, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    r = requests.get(url, stream=True, timeout=60)
+    r.raise_for_status()
+    with open(dst, "wb") as f:
+        for chunk in r.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                f.write(chunk)
+
+
+def _read_idx_images_gz(path: Path) -> torch.Tensor:
+    with gzip.open(path, "rb") as f:
+        magic, n, rows, cols = struct.unpack(">IIII", f.read(16))
+        if magic != 2051:
+            raise ValueError(f"Unexpected magic number for images: {magic}")
+        data = f.read()
+    x = torch.frombuffer(data, dtype=torch.uint8).clone()
+    x = x.view(n, rows, cols)
+    return x
+
+
+def _read_idx_labels_gz(path: Path) -> torch.Tensor:
+    with gzip.open(path, "rb") as f:
+        magic, n = struct.unpack(">II", f.read(8))
+        if magic != 2049:
+            raise ValueError(f"Unexpected magic number for labels: {magic}")
+        data = f.read()
+    y = torch.frombuffer(data, dtype=torch.uint8).clone()
+    y = y.view(n)
+    return y
+
+
+def _load_mnist_split(root: Path, split: str) -> tuple[torch.Tensor, torch.Tensor]:
+    root.mkdir(parents=True, exist_ok=True)
+    cache_path = root / f"mnist_{split}.pt"
+    if cache_path.exists():
+        obj = torch.load(cache_path, map_location="cpu", weights_only=False)
+        return obj["images"], obj["labels"]
+
+    if split == "train":
+        images_name = MNIST_FILES["train_images"]
+        labels_name = MNIST_FILES["train_labels"]
+    elif split == "test":
+        images_name = MNIST_FILES["test_images"]
+        labels_name = MNIST_FILES["test_labels"]
+    else:
+        raise ValueError(f"Unknown split: {split}")
+
+    images_path = root / images_name
+    labels_path = root / labels_name
+
+    if not images_path.exists():
+        _download(MNIST_BASE_URL + images_name, images_path)
+    if not labels_path.exists():
+        _download(MNIST_BASE_URL + labels_name, labels_path)
+
+    images = _read_idx_images_gz(images_path)
+    labels = _read_idx_labels_gz(labels_path).to(torch.long)
+
+    torch.save({"images": images, "labels": labels}, cache_path)
+    return images, labels
+
+
+class MNISTDataset(torch.utils.data.Dataset):
+    def __init__(self, root: str, train: bool):
+        self.root = Path(root).expanduser().resolve() / "mnist"
+        split = "train" if train else "test"
+        images, labels = _load_mnist_split(self.root, split)
+        self.images = images
+        self.labels = labels
+        self.classes = [str(i) for i in range(10)]
+
+    def __len__(self) -> int:
+        return self.labels.numel()
+
+    def __getitem__(self, idx: int):
+        x = self.images[idx].to(torch.float32).div_(255.0).unsqueeze(0)
+        y = self.labels[idx]
+        return x, y
+
+
+train_ds = MNISTDataset(DATA_ROOT, train=True)
 train_ld = torch.utils.data.DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
 
-test_ds = MNIST("../data", train=False, transform=transform, download=True)
+test_ds = MNISTDataset(DATA_ROOT, train=False)
 test_ld = torch.utils.data.DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
 
 class Classifier(nn.Module):
-    def __init__(self, num_classes, dimensions, in_features, device=None):
+    def __init__(self, num_classes, dimensions, in_features, device=None, center_inputs=True):
         super().__init__()
         self.device = device if device is not None else torch.device("cpu")
         self.num_classes = num_classes
         self.dimensions = dimensions
+        self.center_inputs = center_inputs
         self.centroids = None
         
         # 初始化随机投影矩阵，用于将输入特征映射到高维空间
@@ -57,7 +154,8 @@ class Classifier(nn.Module):
         # Flatten input
         x = x.view(x.size(0), -1)
         # 输入数据中心化 (对 FPGA 友好，且有助于二值化)
-        x = x - 0.5
+        if self.center_inputs:
+            x = x - 0.5
         
         # Project to high-dimensional space
         sample_hv = self.projection(x)
@@ -112,11 +210,17 @@ class Classifier(nn.Module):
         return n_correct / n_total
 
 accuracies = []
-for i in range(10):
+for i in range(RUNS):
     torch.manual_seed(i)
-    print(f"\n--- Run {i+1}/10 (Seed={i}) ---")
+    print(f"\n--- Run {i+1}/{RUNS} (Seed={i}) ---")
     
-    model = Classifier(len(train_ds.classes), DIMENSIONS, IMG_SIZE * IMG_SIZE, device=device)
+    model = Classifier(
+        len(train_ds.classes),
+        DIMENSIONS,
+        IMG_SIZE * IMG_SIZE,
+        device=device,
+        center_inputs=not args.no_center,
+    )
     model.fit(train_ld)
     
     print("Testing model...")
@@ -127,5 +231,5 @@ for i in range(10):
 avg_acc = statistics.mean(accuracies)
 std_dev = statistics.stdev(accuracies) if len(accuracies) > 1 else 0.0
 
-print(f"\n>>> Average Accuracy over 10 runs: {avg_acc * 100:.3f}%")
+print(f"\n>>> Average Accuracy over {RUNS} runs: {avg_acc * 100:.3f}%")
 print(f">>> Std Dev: {std_dev * 100:.3f}")
